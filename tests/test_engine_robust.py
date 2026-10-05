@@ -393,3 +393,15 @@ def test_an_adopted_supervisor_session_gets_the_role_once(repo: Path, clock: Fak
     assert eng.backends["supervisor"].sessions_started == 0
     assert "ROLE FOR THIS ENTIRE SESSION" in sent[0]
     assert "ROLE FOR THIS ENTIRE SESSION" not in sent[1] and "Reminder:" in sent[1]
+
+
+def test_a_role_moved_to_another_engine_starts_a_fresh_session(repo: Path, clock: FakeClock) -> None:
+    eng = make_engine(repo, clock, builder=["r0"], supervisor=[ok("go")])
+    eng.st.sessions["supervisor"] = {"engine": "opencode", "id": "ses_old", "closed": False, "adopted": True, "needs_role": True}
+    eng.save()
+    eng = make_engine(repo, clock, builder=["r0", "r1"], supervisor=[ok("go"), DONE])
+    eng.kickoff("go")
+    eng.run()
+    sup = eng.backends["supervisor"]
+    assert sup.sessions_started == 1 and "ROLE FOR THIS ENTIRE SESSION" in sup.sent[0]
+    assert eng.st.sessions["supervisor"]["id"] != "ses_old"

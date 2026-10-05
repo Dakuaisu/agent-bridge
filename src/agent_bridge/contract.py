@@ -48,6 +48,7 @@ def drifted(cfg: Config, approved: dict[str, str | None]) -> list[str]:
 # -- the PRD check
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+_FENCE = re.compile(r"^\s*(`{3,}|~{3,})(.*)$")
 _PHASE_TITLE = re.compile(r"^phase\s+(\d+[a-z]?(?:\.\d+)?)\b", re.IGNORECASE)
 _ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+\S")
 _EXIT = re.compile(r"exit criteria", re.IGNORECASE)
@@ -61,12 +62,18 @@ class Heading:
 
 
 def headings(text: str) -> list[Heading]:
-    out, fenced = [], False
+    out: list[Heading] = []
+    fence: str | None = None
     for i, line in enumerate(text.splitlines()):
-        if line.lstrip().startswith("```"):
-            fenced = not fenced
-            continue
-        if not fenced and (m := _HEADING.match(line)):
+        if f := _FENCE.match(line):
+            if fence is None:
+                fence = f.group(1)
+                continue
+            # CommonMark: only a bare fence of the same character, at least as long, closes a block.
+            if f.group(1)[0] == fence[0] and len(f.group(1)) >= len(fence) and not f.group(2).strip():
+                fence = None
+                continue
+        if fence is None and (m := _HEADING.match(line)):
             out.append(Heading(len(m.group(1)), m.group(2).strip(), i))
     return out
 

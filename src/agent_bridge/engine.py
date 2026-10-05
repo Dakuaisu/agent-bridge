@@ -167,7 +167,8 @@ class Engine:
     def _restore_sessions(self) -> None:
         for role, backend in self.backends.items():
             info = self.st.sessions.get(role) or {}
-            if info.get("id") and not info.get("closed"):
+            # A role moved to another engine in bridge.toml cannot resume the old engine's session.
+            if info.get("id") and not info.get("closed") and info.get("engine") in (None, backend.engine):
                 backend.resume(info["id"])
             else:
                 backend.start_session(self._title(role))

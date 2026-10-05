@@ -176,3 +176,11 @@ def test_gitignore_adds_only_missing_entries(repo: Path) -> None:
     assert contract.ensure_gitignore(repo, (".bridge/", ".omo/"))
     assert (repo / ".gitignore").read_text() == "/.bridge\n.omo/\n"
     assert not contract.ensure_gitignore(repo, (".bridge/", ".omo/"))
+
+
+def test_headings_follow_fences_like_commonmark() -> None:
+    text = (
+        "## Before\n```\n# not a heading\n```\nprose\n```\n```python\n# still code\n```\n"
+        "## Phase 1 - After\n~~~~\n## nor this\n~~~~\n   ```\n# indented fence\n   ```\n### Phase 2 - End\n"
+    )
+    assert [h.title for h in contract.headings(text)] == ["Before", "Phase 1 - After", "Phase 2 - End"]

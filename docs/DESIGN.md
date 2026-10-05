@@ -904,7 +904,8 @@ Pauses, and anything the owner should review, also go to `review.log`.
   improvisation.
 - **Completion** is reached when every phase's exit criteria are met, or the phase is
   blocked only on OWNER-BLOCKED items or plan changes awaiting the owner, and the
-  supervisor has checked this in the repo.
+  supervisor has checked this in the repo. When every `Phase N` heading of the PRD has a
+  verified PHASE COMPLETE, the bridge says so to the supervisor as a fact (DEC-014).
 - **Project text comes from the contract files.** For a migrated project it also comes
   from `project.supervisor_rules` (for example `docs/SUPERVISOR.md`, holding the project
   principles F, X and N hard-coded), inlined into the supervisor's first message.
@@ -989,6 +990,10 @@ danger_commands = []                     # extra regexes over builder shell comm
 caffeinate = true                        # macOS
 ```
 
+A role's `variant` default (`max`, `xhigh`) applies only when the role keeps its default
+engine and model; effort levels are model-specific, so any other model runs at the
+engine's default unless `variant` is set (DEC-015).
+
 Fixed internal constants (documented, not configurable):
 - reply cap 24,000 chars;
 - backoff 60 s to 30 min;
@@ -1025,7 +1030,8 @@ Compatible with the old layout, so migration keeps the logs.
 | `owner_todo.md` | output of `review` |
 | `reports/`, `report.md` | owner-review reports (6.10); `report.md` is the latest |
 
-`init` and `new` add `.bridge/` to `.gitignore`.
+`init` and `new` add `.bridge/` to `.gitignore`, and `.omo/` when a role uses opencode. Both
+are excluded from the repo snapshots behind the tripwire and the change counter (DEC-014).
 
 ## 11. CLI
 
@@ -1036,7 +1042,7 @@ Every command takes `--repo PATH` (default: the cwd's git root) and `--config PA
 | `new "<idea>" [--repo PATH] [--auto-approve] [--planner E:M] [--supervisor E:M] [--builder E:M]` | The planner flow (6.1). |
 | `approve [PC-n …] [--reject PC-n --reason TEXT] [--forever \| --loop N \| --background \| --no-run]` | Approve the plan in `PLAN_REVIEW`, adopt an existing contract, or approve or reject waiting plan changes (6.4, 6.6). |
 | `decide DOC [--auto-approve] [--forever \| --loop N \| --background \| --no-run]` | Owner decisions through the planner (6.7). |
-| `init [--write-rules]` | For an existing repo: write `bridge.toml` from the text template (detecting existing docs, and picking a free port if a role uses opencode), add `.bridge/` to `.gitignore`, and suggest the `AGENTS.md` symlink. It warns if the installed opencode is not 1.18.x (4.2). `--write-rules` adds the generated block to `CLAUDE.md` after showing the diff. Never overwrites. |
+| `init [--planner E:M] [--supervisor E:M] [--builder E:M] [--port N] [--name NAME] [--write-rules] [--adopt-legacy]` | For an existing repo: write `bridge.toml` from the text template (detecting existing docs, and picking a free port if a role uses opencode), add `.bridge/` (and `.omo/` when a role uses opencode) to `.gitignore`, and suggest the `AGENTS.md` symlink. It warns if the installed opencode is not 1.18.x (4.2). `--write-rules` adds the generated block to `CLAUDE.md` and prints the diff. `--adopt-legacy` imports an old `tools/bridge.py` `.bridge/` folder (section 16). Never overwrites `bridge.toml`. |
 | `run [--forever \| --loop N] [--kickoff MSG\|@file] [--new-supervisor] [--new-builder] [--confirm-each] [--background]` | Run the loop on the approved contract. With neither `--forever` nor `--loop`, one exchange. At start it warns if opencode is not 1.18.x, and refuses if a role uses it (4.2). `--kickoff` is an owner message. `--confirm-each` shows each supervisor reply for send, edit or discard (the old manual mode). `--background` detaches, writes to `console.log`, and prints the pid. |
 | `status [--json]` | See below. |
 | `stop [--now]` | 8.2. |
@@ -1175,8 +1181,10 @@ Per project, while its bridge is stopped:
    as the approved contract. Move the project parts of `SYSTEM` and `AUTONOMOUS`
    verbatim into `docs/SUPERVISOR.md`. `init --write-rules` adds the generated block to
    `CLAUDE.md` after showing the diff.
-3. **State.** `agent-bridge pin --builder $(cat .bridge/session)`, and the same for
-   `--supervisor`. Keep `loop.log`, `review.log`, `console.log` and `serve.log`; the
+3. **State.** `agent-bridge init --adopt-legacy` (or `pin --builder $(cat .bridge/session)`,
+   and the same for `--supervisor`). An adopted supervisor session gets the new role text
+   once, in its first turn under agent-bridge (DEC-016). A role whose engine is later
+   changed in `bridge.toml` starts a fresh session instead of resuming the other engine's. Keep `loop.log`, `review.log`, `console.log` and `serve.log`; the
    bridge appends to them. `unsent_reply.md` and `builder_last.md` become the pending
    state. The kickoff files stay where they are.
 4. **Environment.** X's `.env` becomes `project.env_file = ".env"`. N's question polling

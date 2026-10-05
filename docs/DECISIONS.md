@@ -170,3 +170,39 @@ Two findings from the live runs:
   into the repo during any opencode turn, which tripped the supervisor tripwire. `.omo/`
   is excluded from repo snapshots like `.bridge/`, and `init` / `new` add it to
   `.gitignore` when a role uses opencode.
+
+## DEC-015 The default effort goes only with the default model
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+DESIGN v3 gave the planner `max` and the supervisor `xhigh` effort by default. Effort
+levels are model-specific, so `init --supervisor opencode:anthropic/claude-fable-5-1`
+would have passed an effort that model may not take, and the old bridges ran the opencode
+supervisor with no variant. Options:
+- always apply the role default;
+- apply it only with the default engine and model (chosen);
+- never set a default.
+
+Done in 95e4459 (template) and 2f03232 (loader). 95e4459 was committed with its new test
+failing, because a piped pytest hid the exit code; 2f03232 fixed the loader and the test.
+DESIGN section 9 now says this.
+
+## DEC-016 Migration: init --adopt-legacy, and sessions follow their engine
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+DESIGN v3 section 16 migrated state with `pin`. Three additions:
+- **`init --adopt-legacy`** does the migration in one step:
+  - it pins the old `session` and `supervisor_session` (only for roles on opencode);
+  - the old `unsent_reply.md` becomes the next builder message;
+  - otherwise `builder_last.md` becomes the next report for the supervisor.
+  `pin` still works.
+- **An adopted supervisor session gets the role text once.** It never saw the labels,
+  SCOPE, WAIT or REPLAN, and would have been nudged for SCOPE on every turn. Options:
+  start a fresh supervisor (loses its memory), resend the role on every turn (cost), or
+  once (chosen).
+- **A role whose engine changes starts fresh.** Moving the supervisor from opencode to
+  Claude Code in `bridge.toml` would otherwise have resumed an opencode id with `claude
+  --resume`. A stored session now resumes only on the engine that created it.
+
+DESIGN sections 11 and 16 are updated.
