@@ -87,6 +87,9 @@ class State:
     complete: dict[str, Any] | None = None
     planning: dict[str, Any] | None = None
     handoff: dict[str, str] = field(default_factory=dict)
+    planner_queue: list[str] = field(default_factory=list)
+    supervisor_notes: list[str] = field(default_factory=list)
+    replan_history: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> State:
@@ -261,7 +264,7 @@ class Engine:
 
     def handle_inbox_item(self, kind: str, data: dict[str, Any]) -> bool:
         """Approvals and decisions docs; handled by the planner layer."""
-        self.j.event("inbox_ignored", kind=kind)
+        self.j.event("inbox_ignored", item=kind)
         return False
 
     # ------------------------------------------------------------------ the loop
@@ -305,6 +308,8 @@ class Engine:
             return self._sleeping()
         if phase == "REPLANNING":
             return self.replanning()
+        if phase == "PLANNING":
+            return self.planning_step()
         if phase == "COMPLETE":
             return EXIT_OK
         if phase == "PAUSED":
@@ -317,6 +322,9 @@ class Engine:
 
     def replanning(self) -> int | None:
         return self.pause("error", "REPLANNING needs the planner layer")
+
+    def planning_step(self) -> int | None:
+        return self.pause("error", "PLANNING needs the planner layer")
 
     def _resume_from_pause(self) -> None:
         pause = self.st.pause or {}
@@ -363,7 +371,7 @@ class Engine:
         for item in self.st.owner_queue:
             if item["to_builder"] and not item["delivered"]:
                 blocks.append(Block("owner", item["text"], note="(verbatim; binding)"))
-        for text in p.get("planner", []):
+        for text in [*self.st.planner_queue, *p.get("planner", [])]:
             blocks.append(Block("planner", text))
         for note in p.get("notes", []):
             blocks.append(Block("bridge", note_text(note)))
@@ -392,6 +400,7 @@ class Engine:
         self.j.transcript(f"EXCHANGE {n} | to builder ({backend.describe()})", message)
         self.j.event("message", recipient="builder", exchange=n, blocks=[{"origin": b.origin, "note": b.note} for b in blocks])
         before = self.repo.snapshot()
+        self.before_builder_turn()
         started = self.now()
         try:
             reply = self._send("builder", message)
@@ -408,6 +417,7 @@ class Engine:
         for item in self.st.owner_queue:
             if item["to_builder"] and not item["delivered"]:
                 item["delivered"] = True
+        self.st.planner_queue = []
         for b in blocks:
             if b.origin == "planner":
                 self.st.feed.append({"origin": "planner", "text": b.text})
@@ -428,7 +438,7 @@ class Engine:
         self.j.transcript(f"EXCHANGE {st.exchange} | builder report", reply.text)
         self._check_models("builder", reply)
         self._audit_builder(reply, before, after)
-        self.after_builder_audit(before, after)
+        notes = self.after_builder_audit(before, after)
         signals = parse_builder(reply.text, now=self.now(), phase_pattern=cfg.rotation.phase_complete_pattern)
         changed = before.fingerprint() != after.fingerprint()
         st.counters["unchanged"] = 0 if changed else st.counters.get("unchanged", 0) + 1
@@ -445,6 +455,7 @@ class Engine:
             "phase_claims": signals.phase_claims,
             "context_tokens": reply.context_tokens,
             "nudges": [],
+            "notes": notes,
         }
         st.pending = None
         st.phase = "SUPERVISOR_TURN"
@@ -467,8 +478,12 @@ class Engine:
             return self._sleep_until(self.now() + timedelta(seconds=seconds), f"idle backstop: {unchanged} exchanges without a repo change", resume="SUPERVISOR_TURN")
         return None
 
-    def after_builder_audit(self, before: Snapshot, after: Snapshot) -> None:
-        """Contract drift; filled by the planner layer."""
+    def before_builder_turn(self) -> None:
+        """Remember the contract hashes; filled by the planner layer."""
+
+    def after_builder_audit(self, before: Snapshot, after: Snapshot) -> list[str]:
+        """Contract drift during the turn, as notes for the supervisor; filled by the planner layer."""
+        return []
 
     def _audit_builder(self, reply: Reply, before: Snapshot, after: Snapshot) -> None:
         patterns = list(DEFAULT_DANGER) + [(p, "safety.danger_commands") for p in self.cfg.safety.danger_commands]
@@ -524,6 +539,10 @@ class Engine:
         blocks.append(Block("bridge", self._since_text(review)))
         for note in review.get("notes", []):
             blocks.append(Block("bridge", note))
+        for note in st.supervisor_notes:
+            blocks.append(Block("bridge", note))
+        for text in review.get("planner", []):
+            blocks.append(Block("planner", text))
         if review.get("wait"):
             blocks.append(Block("bridge", f"The builder asked for: {review['wait']}. It is honoured after your reply unless you write NO WAIT or a different WAIT line."))
         if review.get("wait_error"):
@@ -605,6 +624,7 @@ class Engine:
             self.save()
             return out
         st.handoff.pop("supervisor", None)
+        st.supervisor_notes = []
         for item in st.owner_queue:
             if item["to_supervisor"]:
                 item["shown"] = True
@@ -713,6 +733,9 @@ class Engine:
             st.review = None
             return self.pause("escalation", out.escalate, resume="BUILDER_TURN")
         handled = self.handle_directives(out)
+        if handled == "again":
+            self.save()
+            return None
         if handled is not None:
             return handled
         if st.phase != "SUPERVISOR_TURN":
@@ -748,8 +771,8 @@ class Engine:
         self.save()
         return None
 
-    def handle_directives(self, out: SupervisorOutput) -> int | None:
-        """REPLAN; filled by the planner layer. None means: deliver the reply."""
+    def handle_directives(self, out: SupervisorOutput) -> int | str | None:
+        """REPLAN; filled by the planner layer. None: deliver the reply; "again": the supervisor goes again."""
         return None
 
     def _phase_complete(self, phase: str) -> None:
@@ -805,6 +828,8 @@ class Engine:
             if self.sd.stop_requested():
                 return None
             self.take_inbox()
+            if st.phase != "WAITING" or not st.wait:
+                return None
             if st.wait.get("interrupted"):
                 note = prompts.wait_interrupted_note(spec)
                 outcome = "interrupted by an owner message"

@@ -573,6 +573,8 @@ Context, options, decision and reasons, written by the decider.
   - `AWAITING OWNER`
   - `REJECTED by the owner: <reason>`
   - `SUPERSEDED by DEC-n`
+  - `VERIFIED (phase boundary)`, for the entry the bridge records at the supervisor's
+    `PHASE COMPLETE` (DEC-007)
 - The builder records its own in-loop decisions (approved by the supervisor) in the same
   format, with "Decided by: builder, approved by the supervisor", as the `CLAUDE.md`
   block requires.
@@ -649,16 +651,20 @@ This is the OWNER_REVIEW.md flow, routed through the planner:
 4. It then runs `--forever`, or `--loop N`, `--background` or `--no-run`.
 
 If a loop is already running, `decide` queues DOC, and it is handled at the next step
-boundary.
+boundary. Owner decisions supersede a builder report that was waiting for review, and an
+active wait; both are logged as events.
 
 ### 6.8 Contract integrity
 
 - At approval, and after each applied change, the bridge records the sha256 of the PRD,
   the rules and `bridge.toml`.
-- After every builder turn it compares them. A change made by the builder goes to
-  `review.log`, and to the supervisor as `[bridge] The builder changed docs/PRD.md (diff
-  …). The contract changes only through the planner.` The bridge never reverts anything
-  itself.
+- It compares them before and after every builder turn (DEC-006). A change made during
+  the turn goes to `review.log`, and to the supervisor as `[bridge] The builder changed
+  docs/PRD.md during its turn (diff …). The contract changes only through the planner.`
+  The bridge never reverts anything itself.
+- A change made outside any turn (the owner editing a file between runs) is reported at
+  the next `run` as `CONTRACT CHANGED OUTSIDE A TURN`, not blamed on the builder. The
+  owner re-approves the current files with `agent-bridge approve`.
 - A running loop never reloads `bridge.toml`. A change shows in `status` and `check`, and
   applies at the next `run`.
 

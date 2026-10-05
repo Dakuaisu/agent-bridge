@@ -44,3 +44,61 @@ SCOPE, AFFECTS and the blocked set compare normalized tokens: ids such as `R-4` 
 `F-59`, and numbered phases such as `phase 3a`. A named phase ("Phase Alpha") is not
 recognised as a token. Matching free text would block on stray words. Planner-written
 PRDs number their phases, and the PRD check enforces it.
+
+## DEC-005 "Weakens" is detected conservatively
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+DESIGN 6.6 says a change that weakens an exit criterion or a threshold always waits for
+the owner, but the planner cannot be trusted to flag it. The bridge treats a PRD edit as
+weakening when either:
+- it changes or removes any number; or
+- it changes or removes a line of an exit-criteria list.
+
+Adding a criterion is material but not weakening. Options:
+- trust the planner's flag;
+- parse the comparisons ("≥ 0.90" vs "≥ 0.80");
+- the conservative textual rule above.
+
+Chosen: the textual rule. It over-flags, for example renumbering, but a false alarm only
+costs the owner a look. A miss would let a phase pass by moving its bar.
+
+## DEC-006 Contract drift is attributed per turn
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+Comparing the contract against the approved hashes after each builder turn would blame
+the builder for the owner's own edits between runs. The bridge now compares the hashes
+before and after each builder turn; only a change inside the turn is "changed by the
+builder". A change found at `run` start is reported as "outside a turn", and
+`agent-bridge approve` re-approves the current files. DESIGN 6.8 is updated.
+
+## DEC-007 Phase completions in the ledger get their own status
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+DESIGN 6.5 had no status for the entry recorded at `PHASE COMPLETE`, and none of the
+listed statuses fit, since it is neither a proposal nor an owner decision. Added:
+`VERIFIED (phase boundary)`, with "Decided by: supervisor (verified at exchange N)".
+
+## DEC-008 Owner decisions supersede pending work
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+When `decide` arrives, a builder report waiting for review is not reviewed, and an
+active wait is dropped. The fresh supervisor sees the builder's next report. Both are
+logged as events. Options:
+- finish the pending review first;
+- queue the decisions until after the wait;
+- supersede (chosen).
+
+The owner's decisions change the plan the review would have been judged against.
+
+## DEC-009 A failed re-plan leaves the plan unchanged
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+If the planner's answer to a supervisor REPLAN fails the bridge's checks twice (for
+example a FIND that does not match), the supervisor is told the plan is unchanged and
+continues under the current contract; the failure goes to `review.log`. For `new` and
+`decide`, where the owner is waiting on the result, the run pauses instead.

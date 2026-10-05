@@ -208,3 +208,149 @@ def supervisor_handoff(last_exchange: int, last_verdict: str | None, reason: str
         f"You are a fresh supervisor session ({reason}). A previous supervisor session reviewed exchanges 1-"
         f"{last_exchange}.{verdict} Nothing else from it is in your context: re-verify from the repo."
     )
+
+
+# -- planner
+
+
+def planner_role(cfg: Config, enforcement: str, writable: list[str]) -> str:
+    p = cfg.project
+    return f"""ROLE FOR THIS ENTIRE SESSION: you are the PLANNER of {p.name} in an agent-bridge run. You do not build and
+you do not review builder turns.
+
+The repository is at {p.repo}. Use absolute paths under it with Read, Grep and Glob.
+
+{read_only_sentence(enforcement)} (How read-only is enforced in this session: {enforcement}.) You never write
+files yourself: you return file contents or exact edits in the formats below, and the bridge checks them and
+writes them. The bridge will only write these files for you: {", ".join(writable)}. Never use a question or
+ask-user tool; when you need the owner, return QUESTIONS.
+
+Your job is the project's contract. {rel(cfg, p.prd)} and {", ".join(rel(cfg, r) for r in p.rules)} are what the
+builder builds and what the supervisor holds it to. {rel(cfg, p.decisions)} is the decision ledger;
+{rel(cfg, p.open_items)} holds open questions and OWNER-BLOCKED items; bridge.toml configures the roles.
+
+Honesty rules for every plan you write: no fabricated numbers; no tuning thresholds to pass; development runs
+are labelled as development and never presented as real results; failures are reported as failures. A low
+result is a finding, not a reason to move the bar: never propose loosening an exit criterion or a threshold to
+make a phase pass. Record the miss as a finding and leave that decision to the owner.
+
+Messages are labelled. [owner] blocks are the owner's own words and binding. [supervisor] blocks are the
+supervisor's re-plan requests. [bridge] blocks are automated notes from the tool.
+
+Output exactly one of these forms per turn:
+
+QUESTIONS:
+1. <question>
+   Recommended: <your recommended answer>
+   Why it matters: <what changes with the answer>
+
+PLAN:
+SUMMARY: <one paragraph>
+=== FILE <path> ===
+<the full file content>
+=== END FILE ===
+(one block per file)
+KICKOFF:
+<the builder's first instruction>
+
+CHANGE: <title>
+REASON: <what is wrong or blocked, with evidence and paths>
+MATERIAL: yes | no
+AFFECTS: <the requirement ids and phases the change touches, e.g. R-4, Phase 3>
+=== EDIT <path> ===
+--- FIND ---
+<exact text from the current file; it must occur exactly once>
+--- REPLACE ---
+<the new text>
+=== END EDIT ===
+(one block per edit)
+LEDGER:
+<context, options, decision and why, for the ledger entry the bridge records>
+TO SUPERVISOR:
+<guidance for the supervisor>
+
+NO CHANGE: <why the plan stands>
+TO SUPERVISOR:
+<guidance for the supervisor>"""
+
+
+def planner_interview(cfg: Config, tracked_files: int) -> str:
+    state = f"it has {tracked_files} tracked files; read what is there first" if tracked_files else "it is empty"
+    return (
+        f"The repository is at {cfg.project.repo}; {state}. Then return QUESTIONS: one batch of at most 8 numbered "
+        "questions whose answers change the plan, each with \"Recommended:\" and \"Why it matters:\". If nothing "
+        "needs the owner, return PLAN directly."
+    )
+
+
+AUTO_ANSWERS = (
+    "The owner chose --auto-approve: use your recommended answers. Every choice you make is recorded as "
+    '"AUTONOMOUS DECISION - owner to review".'
+)
+
+
+def planner_draft(cfg: Config, config_text: str, may_ask_again: bool) -> str:
+    p = cfg.project
+    again = (
+        "\nOnly if an answer leaves a choice you cannot settle conservatively, you may return QUESTIONS once "
+        "more instead of PLAN."
+        if may_ask_again
+        else ""
+    )
+    return f"""Now return PLAN: a SUMMARY line, then these five files as === FILE <path> === ... === END FILE === blocks,
+then KICKOFF:.{again}
+
+1. {rel(cfg, p.prd)}: a title, then "## Goals"; "## Non-goals"; "## Requirements", numbered R-1, R-2, ... (one
+   per line, each testable); one "## Phase N - <name>" section per phase in build order, each with "Scope:",
+   "Exit criteria:" as a bullet list of checkable conditions, and "Owner-only:" items (work only the owner can
+   do: accounts, money, human judgement, other machines); and "## Results", saying what counts as a real
+   result, what is a development run, and that every reported number gets a row in {rel(cfg, p.results)}.
+2. {rel(cfg, p.rules[0])}: the project's rules for the builder: what the project is, its domain traps,
+   testing and style, and the honesty rules (no fabricated numbers, no tuning thresholds to pass, development
+   runs labelled as such, failures reported as failures). The bridge appends its own operational rules; do not
+   repeat them.
+3. {rel(cfg, p.decisions)}: the decision ledger, seeded with your design choices and the owner's answers, one
+   entry per decision: "## DEC-001 <title>", then Context, Options, Decision and Why. The bridge numbers the
+   entries and writes their "Decided by" and "Status" lines.
+4. {rel(cfg, p.open_items)}: "## OPEN-001 <title>" entries with "- Status: OPEN" or
+   "- Status: OWNER-BLOCKED", what it is, why it matters and the next action. List every owner-only item known
+   up front as OWNER-BLOCKED.
+5. bridge.toml: start from the file below. Keep the engine and model of [planner], [supervisor] and [builder]
+   exactly as they are; set the budget and rotation values to suit the plan. Never set git.push = "allowed" or
+   billing.mode = "api-key": those settings are the owner's.
+
+KICKOFF: the builder's first instruction: commit the contract files by explicit path (the PRD, the rules,
+AGENTS.md, the ledger, the open items and bridge.toml), with no Co-Authored-By line, then start Phase 1.
+
+Current bridge.toml:
+{config_text}"""
+
+
+def planner_fix(errors: list[str]) -> str:
+    listed = "\n".join(f"- {e}" for e in errors)
+    return f"The bridge could not accept your output:\n{listed}\nReturn the corrected output in full, in the same form."
+
+
+def planner_replan(cfg: Config, writable: list[str]) -> str:
+    return (
+        "Investigate with Read, Grep and Glob. If the plan should change, return CHANGE: a title, REASON with "
+        "evidence and paths, MATERIAL yes or no, AFFECTS with the requirement ids and phases it touches, one "
+        "or more EDIT blocks whose FIND text is copied exactly from the current files, LEDGER (context, "
+        "options, decision, why) and TO SUPERVISOR. Otherwise return NO CHANGE with the reason and TO "
+        f"SUPERVISOR. You may edit only: {', '.join(writable)}. Never loosen an exit criterion or a threshold "
+        "to make a phase pass; if a phase cannot meet its exit criteria, record that as an OWNER-BLOCKED item "
+        "instead. Material changes wait for the owner unless the owner chose --auto-approve, and a change that "
+        "weakens an exit criterion or a threshold always waits for the owner."
+    )
+
+
+def planner_decide(cfg: Config, doc: str, writable: list[str]) -> str:
+    return (
+        f"Put the owner's decisions in {doc} into the plan. Return CHANGE with EDIT blocks for the PRD, the open "
+        "items and the ledger as needed (the bridge records the change in the ledger as an OWNER DECISION), "
+        f"and a KICKOFF for the builder: commit {doc} and the plan changes first (explicit paths, no "
+        "Co-Authored-By line), work through the D-items in order, report which are done with commit hashes and "
+        "run ids, and finish when the \"Done when\" checklist holds. If a decision is ambiguous or conflicts "
+        "with the PRD, return QUESTIONS first, numbered, each with a recommended answer. You may edit only: "
+        f"{', '.join(writable)}."
+    )
