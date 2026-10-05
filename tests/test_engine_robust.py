@@ -334,3 +334,47 @@ def test_crash_mid_turn_resends_with_a_restart_note(repo: Path, clock: FakeClock
     assert "The bridge restarted while you were working" in eng2.backends["builder"].sent[0]
     assert eng2.backends["builder"].aborts == 1
     assert eng2.backends["builder"].sent[0].count("[owner] (verbatim; binding)\ngo") == 1
+
+
+# -- the builder must stay in the repo (INVENTORY L22: the smoke-test incident)
+
+
+def test_builder_messages_name_the_repo_and_require_absolute_paths(repo: Path, clock: FakeClock) -> None:
+    eng = make_engine(repo, clock, builder=["r0", "r1"], supervisor=[ok("go"), DONE])
+    eng.kickoff("go")
+    eng.run()
+    root = eng.cfg.project.repo
+    for message in eng.backends["builder"].sent:
+        assert f"[bridge] The repository is {root}. Use absolute paths under it" in message
+        assert f"start every shell command with `cd {root} &&`" in message
+    assert "The repository is" not in eng.backends["supervisor"].sent[1].split("===== BUILDER REPORT")[0].split("builder was told")[-1]
+
+
+def test_builder_writing_in_another_repo_pauses_the_run(repo: Path, clock: FakeClock) -> None:
+    from agent_bridge.backends.base import ToolCall
+
+    calls = [
+        ToolCall("write", "/Users/someone/src/other-project/docs/PRD.md"),
+        ToolCall("bash", "cd /Users/someone/src/other-project && git add docs/PRD.md && git commit -m x"),
+        ToolCall("bash", f"cd {repo} && pytest -q"),
+        ToolCall("bash", "/opt/homebrew/bin/python3.12 -m pytest"),
+    ]
+    eng = make_engine(repo, clock, builder=[FakeStep(text="committed", tool_calls=calls)], supervisor=[])
+    eng.kickoff("go")
+    assert eng.run() == 3
+    st = state(repo)
+    assert st.pause["reason"] == "outside the repo" and st.pause["resume"] == "SUPERVISOR_TURN"
+    assert "/Users/someone/src/other-project/docs/PRD.md" in st.pause["detail"]
+    log = review_log(repo)
+    assert "BUILDER WROTE OUTSIDE THE REPO at exchange 0: run paused" in log
+    assert "pytest" not in log.split("run paused")[1].split("===")[0]
+
+
+def test_builder_reading_elsewhere_is_only_reported(repo: Path, clock: FakeClock) -> None:
+    from agent_bridge.backends.base import ToolCall
+
+    calls = [ToolCall("read", "/Users/someone/notes.md"), ToolCall("bash", "ls -la /Users/someone/src/other-project/docs/")]
+    eng = make_engine(repo, clock, builder=[FakeStep(text="looked around", tool_calls=calls), "r1"], supervisor=[ok("go"), DONE])
+    eng.kickoff("go")
+    assert eng.run() == 0
+    assert "BUILDER READ OUTSIDE THE REPO at exchange 0" in review_log(repo)

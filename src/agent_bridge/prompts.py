@@ -133,6 +133,15 @@ HEADLESS = (
     "line: WAIT FOR PID <n> | WAIT FOR FILE <path> | WAIT UNTIL <ISO-8601 time>."
 )
 
+
+def workdir_rule(repo: Path) -> str:
+    # The claude-bridge login wrapper can present its own directory as the working directory (INVENTORY L22).
+    return (
+        f"The repository is {repo}. Use absolute paths under it for every file you read or write, and start every "
+        f"shell command with `cd {repo} &&`. Your tools may resolve relative paths somewhere else. Never read, write "
+        "or commit in any other repository."
+    )
+
 EMPTY_NUDGE = (
     "Your previous turn ended without any text. Using only reads, reply now in the required shape: VERDICT, "
     "SCOPE, optional directives, REPLY."

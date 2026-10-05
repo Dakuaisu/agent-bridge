@@ -54,8 +54,8 @@ def test_message_events_record_origins(repo: Path, clock: FakeClock) -> None:
     eng.kickoff("hello")
     eng.run()
     msgs = events(repo, "message")
-    assert [b["origin"] for b in msgs[0]["blocks"]] == ["bridge", "owner"]
-    assert [b["origin"] for b in msgs[1]["blocks"]] == ["bridge", "supervisor"]
+    assert [b["origin"] for b in msgs[0]["blocks"]] == ["bridge", "bridge", "owner"]
+    assert [b["origin"] for b in msgs[1]["blocks"]] == ["bridge", "bridge", "supervisor"]
     assert all(m["recipient"] == "builder" for m in msgs)
 
 

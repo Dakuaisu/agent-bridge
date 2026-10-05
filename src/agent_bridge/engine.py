@@ -7,6 +7,7 @@ and recorded in loop.log exactly as delivered.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
@@ -57,6 +58,12 @@ DEFAULT_DANGER = [
 ]
 PUSH = re.compile(r"\bgit\s+push\b")
 SHELL_TOOLS = {"bash", "shell"}
+FILE_WRITE_TOOLS = {"write", "edit", "multiedit", "patch", "apply_patch", "notebookedit"}
+OUTSIDE_PATH = re.compile(r"(?<![\w.~-])(/[^\s'\";|&()<>`]+)")
+SHELL_WRITE = re.compile(
+    r"\bgit\s+(?:-C\s+\S+\s+)?(?:commit|add|reset|checkout|switch|push|rm|mv|merge|rebase|stash|clean|restore|tag|cherry-pick|revert|am|apply)\b"
+    r"|\b(?:rm|mv|cp|touch|mkdir|tee|truncate|ln)\s|\bsed\s+-i|>{1,2}\s*/"
+)
 
 
 class FatalError(Exception):
@@ -365,7 +372,7 @@ class Engine:
 
     def builder_message(self) -> tuple[str, list[Block]]:
         p = self.st.pending or new_pending()
-        blocks = [Block("bridge", prompts.HEADLESS)]
+        blocks = [Block("bridge", prompts.HEADLESS), Block("bridge", prompts.workdir_rule(self.cfg.project.repo))]
         blocked = self.blocked_tokens()
         if blocked:
             blocks.append(Block("bridge", f"Blocked until the owner settles them: {', '.join(blocked)}. Do not work on them."))
@@ -422,7 +429,7 @@ class Engine:
         for b in blocks:
             if b.origin == "planner":
                 self.st.feed.append({"origin": "planner", "text": b.text})
-            elif b.origin == "bridge" and b.text != prompts.HEADLESS and not b.text.startswith("Blocked until"):
+            elif b.origin == "bridge" and b.text != prompts.HEADLESS and not b.text.startswith(("Blocked until", "The repository is ")):
                 self.st.feed.append({"origin": "bridge", "text": b.text})
         self._prune_owner_queue()
 
@@ -439,6 +446,7 @@ class Engine:
         self.j.transcript(f"EXCHANGE {st.exchange} | builder report", reply.text)
         self._check_models("builder", reply)
         self._audit_builder(reply, before, after)
+        outside = self._outside_repo(reply)
         notes = self.after_builder_audit(before, after)
         signals = parse_builder(reply.text, now=self.now(), phase_pattern=cfg.rotation.phase_complete_pattern)
         changed = before.fingerprint() != after.fingerprint()
@@ -472,6 +480,13 @@ class Engine:
             decisions=len(signals.decisions_needed),
             wait=st.review["wait"],
         )
+        if outside:
+            return self.pause(
+                "outside the repo",
+                f"the builder changed files outside {cfg.project.repo} at exchange {st.exchange}: {'; '.join(outside)}. "
+                "Check those places (another repository may have changed), then `agent-bridge run` to continue.",
+                resume="SUPERVISOR_TURN",
+            )
         unchanged = st.counters["unchanged"]
         if unchanged >= IDLE_SLEEP_AFTER and not signals.wait:
             seconds = min(IDLE_SLEEP_START * 2 ** (unchanged - IDLE_SLEEP_AFTER), IDLE_SLEEP_MAX)
@@ -481,6 +496,26 @@ class Engine:
 
     def before_builder_turn(self) -> None:
         """Remember the contract hashes; filled by the planner layer."""
+
+    def _outside_repo(self, reply: Reply) -> list[str]:
+        """Writes under the owner's home outside the repo: reported, and they pause the run. Reads are only reported."""
+        repo = os.path.realpath(self.cfg.project.repo)
+        home = os.path.realpath(Path.home())
+        roots = tuple({"/Users/", home + os.sep})
+        writes, reads = [], []
+        for call in reply.tool_calls:
+            paths = [p for p in OUTSIDE_PATH.findall(call.summary) if p.startswith(roots) or os.path.realpath(p).startswith(roots)]
+            paths = [p for p in paths if not (os.path.realpath(p) == repo or os.path.realpath(p).startswith(repo + os.sep))]
+            if not paths:
+                continue
+            name = call.name.lower()
+            mutating = name in FILE_WRITE_TOOLS or (name in SHELL_TOOLS and SHELL_WRITE.search(call.summary))
+            (writes if mutating else reads).append(f"{call.name}: {call.summary[:200]}")
+        if reads:
+            self.j.review(f"BUILDER READ OUTSIDE THE REPO at exchange {self.st.exchange}", "\n".join(reads))
+        if writes:
+            self.j.review(f"BUILDER WROTE OUTSIDE THE REPO at exchange {self.st.exchange}: run paused", "\n".join(writes))
+        return writes
 
     def after_builder_audit(self, before: Snapshot, after: Snapshot) -> list[str]:
         """Contract drift during the turn, as notes for the supervisor; filled by the planner layer."""

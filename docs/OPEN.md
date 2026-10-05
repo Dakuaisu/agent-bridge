@@ -18,3 +18,19 @@ Status: OPEN, OWNER-BLOCKED or RESOLVED.
   `claude login`. Per the overnight instructions, no re-login is attempted.
 - Next: the owner runs `claude login`, then the Claude Code smoke test
   (MORNING_REPORT.md says how).
+
+## OPEN-002 Smoke-test commit in ~/src/opencode-claude-bridge: repaired, owner to confirm
+- Status: OPEN
+- What: the opencode smoke test's builder committed `22af7c8` "Contract: wordcount
+  module with pytest tests" on `fix/ec2-audit-hardening`, and wrote two files there (L22).
+  It was never pushed.
+- Done so far:
+  - the branch is back at `f6cb717`, the owner's last commit;
+  - your uncommitted `src/index.ts` and `src/index.test.ts` changes are untouched;
+  - the commit is kept on the branch `agent-bridge-smoke-accident-20261006`;
+  - the files are in `/tmp/agent-bridge-smoke-accident-backup-20261006/`.
+- Next (owner):
+  1. Check `git -C ~/src/opencode-claude-bridge log --oneline -3` and `git status`.
+  2. Then `git -C ~/src/opencode-claude-bridge branch -D agent-bridge-smoke-accident-20261006`
+     and `rm -rf /tmp/agent-bridge-smoke-accident-backup-20261006`.
+  3. To undo the repair instead: `git reset --soft agent-bridge-smoke-accident-20261006`.

@@ -283,6 +283,8 @@ Builder message (empty blocks omitted):
 [bridge] Headless run: never use a question or ask-user tool; put questions under
 DECISIONS NEEDED. To pause for a job or a time, end your report with one line:
 WAIT FOR PID <n> | WAIT FOR FILE <path> | WAIT UNTIL <ISO-8601 time>.
+[bridge] The repository is <absolute path>. Use absolute paths under it for every file, and
+start every shell command with `cd <repo> &&`. Never work in any other repository. (L22)
 [bridge] Blocked until the owner settles them: R-4, Phase 3 (PC-3).   (only while any)
 [owner] (verbatim; binding)
 <owner text>
@@ -868,6 +870,12 @@ Pauses, and anything the owner should review, also go to `review.log`.
   danger patterns, and hits go to `review.log` with the exact command. Prose is not
   matched (L9). The patterns: force push; `push` when `git.push = "never"`; `reset
   --hard`; `rm -rf` outside the repo; `DROP TABLE`; plus `safety.danger_commands`.
+- **The builder stays in the repo (L22).** After each builder turn, its tool calls are
+  checked for paths under `/Users/` (or the owner's home) outside the repo:
+  - a write there (a write or edit tool, or a shell command that commits, adds, moves,
+    removes or redirects) pauses the run, so the owner can check the other place first
+    (DEC-013);
+  - a read there is only reported.
 - **Git checks** after each builder turn:
   - new commits whose message carries `Co-Authored-By` or AI attribution are flagged;
   - so are commits whose author differs from the repo's local `user.email`;

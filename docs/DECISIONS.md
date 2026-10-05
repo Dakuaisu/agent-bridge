@@ -136,3 +136,23 @@ existing contract" path and recorded hashes of files that did not exist. Two cha
 `say` now answers the planner whenever it waits for the owner. That includes a draft
 paused on failed checks, where `say` previously queued the answers as a message for the
 builder.
+
+## DEC-013 A builder write outside the repo pauses the run
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+After the L22 incident, the bridge checks the builder's tool calls after every turn.
+- **"Outside"** means a path under `/Users/` or the owner's home that is not inside the
+  repo. `/tmp` and system paths such as `/opt/homebrew/bin/python3.12` are not flagged.
+- **Writes** pause the run: write or edit tools, and shell commands that commit, add,
+  reset, check out, move, remove, copy, `sed -i` or redirect.
+- **Reads** go to `review.log` only.
+
+Options:
+- block before the turn (impossible: the bridge only sees tool calls after they ran);
+- report only;
+- pause on writes (chosen).
+
+The pause comes after the damage, but it stops a second turn from making it worse, and
+`PAUSED.md` names the paths. The absolute-path line in every builder message is the
+preventive half.

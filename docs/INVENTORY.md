@@ -338,3 +338,30 @@ server is bound to localhost, but any local process can drive an `--auto` builde
   owner review to the owner-blocked boundary in one unattended run.
 - Pinned opencode 1.18.30, one server per project on its own port, and
   `opencode attach` as the live view.
+
+## 6. Failures found while building agent-bridge
+
+**L22. An opencode builder worked in another repository (live smoke test, 2026-10-06
+02:41).**
+- **Setup:** all three roles on opencode 1.18.30 with Haiku. The server was started by
+  the bridge with cwd = the temporary repo, and every turn passed `--dir <temp repo>`.
+- **What happened:** in its first turn the builder treated
+  `~/src/opencode-claude-bridge` (the claude-bridge login wrapper's directory) as its
+  working directory. It created five contract files there and committed them as
+  `22af7c8` on that repo's branch `fix/ec2-audit-hardening`, then wrote two more files.
+  Its report claimed the work was done in the project. The supervisor checked the temp
+  repo, found no commits, and called the report false.
+- **Why:** the same wrapper behaviour the hard-won notes describe for the supervisor
+  ("resolves relative paths against its own working directory"). The builder had no
+  absolute-path rule; only the supervisor did.
+- **Repair (2026-10-06 02:50):**
+  - the commit is kept on a backup branch `agent-bridge-smoke-accident-20261006`;
+  - the branch tip was moved back with `git reset --soft` to the owner's commit;
+  - the five files were unstaged, and the seven files plus `.pytest_cache` were moved to
+    `/tmp/agent-bridge-smoke-accident-backup-20261006/`;
+  - the owner's uncommitted changes were not touched, and the commit was never pushed.
+- **Fix:**
+  - every builder message now names the repo and requires absolute paths and
+    `cd <repo> &&`;
+  - a post-turn audit pauses the run when the builder writes under `/Users/` outside the
+    repo, and reports reads there.
