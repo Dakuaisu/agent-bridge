@@ -94,11 +94,14 @@ class ContractEngine(Engine):
 
     # ------------------------------------------------------------------ the loop
 
-    def run(self, *, exchanges: int | None = None) -> int:
+    def can_run(self) -> bool:
         planning = self.st.phase in ("PLANNING", "INTERVIEW", "DRAFTING", "PLAN_REVIEW") or (
             self.st.phase == "PAUSED" and (self.st.pause or {}).get("resume") in ("PLANNING", "INTERVIEW")
         )
-        if self.st.contract is None and not planning:
+        return self.st.contract is not None or planning
+
+    def run(self, *, exchanges: int | None = None) -> int:
+        if not self.can_run():
             self.j.console(
                 "No approved contract. Start a project with `agent-bridge new`, or adopt this repo's PRD and rules "
                 "with `agent-bridge approve`."
