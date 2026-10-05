@@ -308,7 +308,8 @@ def config_from_dict(data: dict[str, Any], path: Path) -> Config:
         if not model:
             problems.append(f"{role}.model: must not be empty")
             model = d["model"]
-        variant = rt.get("variant", str, d["variant"])
+        default_variant = d["variant"] if (engine, model) == (d["engine"], d["model"]) else None
+        variant = rt.get("variant", str, default_variant)
         if engine == "claude-code" and variant is not None and variant not in CLAUDE_EFFORTS:
             problems.append(f"{role}.variant: Claude Code effort must be one of {', '.join(CLAUDE_EFFORTS)}; got {variant!r}")
             variant = None
