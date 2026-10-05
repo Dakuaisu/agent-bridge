@@ -1,4 +1,131 @@
 # agent-bridge
 
-Runs a planner, a supervisor and a builder agent against one repo, unattended, with an
-honest audit trail. Work in progress; see `docs/DESIGN.md`.
+Runs three agents against one git repo, unattended, with an honest audit trail:
+
+- **planner**: interviews you, writes the contract (`docs/PRD.md`, `CLAUDE.md`, the
+  decision ledger, `docs/OPEN.md`), and answers re-plan requests and your decisions;
+- **supervisor**: read-only; verifies each builder report against the repo and writes
+  the next instruction;
+- **builder**: does the work and commits it.
+
+Each role runs on **Claude Code** (`claude -p`) or **opencode 1.18.x**, with its own
+model. Python 3.12, standard library only. The design is in `docs/DESIGN.md`, the
+decisions taken while building it are in `docs/DECISIONS.md`, and open items are in
+`docs/OPEN.md`.
+
+## Install
+
+Requirements:
+- Python 3.12 or newer;
+- the `claude` CLI, logged in (`claude auth status`), for any role on Claude Code;
+- opencode **1.18.x** (tested with 1.18.30), for any role on opencode, with
+  `"autoupdate": false`. 2.x is refused.
+
+```
+git clone <this repo> agent-bridge && cd agent-bridge
+python3.12 -m venv .venv
+.venv/bin/pip install -e .            # no runtime dependencies
+.venv/bin/agent-bridge --version
+```
+
+Development: `.venv/bin/pip install -e '.[dev]'`, then `.venv/bin/python -m pytest`.
+
+## Quick start
+
+### A new project
+
+```
+mkdir ~/src/myproject && cd ~/src/myproject && git init
+git config user.name "Your Name" && git config user.email "you@example.com"
+agent-bridge new "A Python CLI that ..."     # the planner asks a few questions
+agent-bridge say @answers.md                 # only if you ran `new` without a terminal
+agent-bridge approve                         # read docs/PRD.md and CLAUDE.md first
+```
+
+In a terminal, `new` asks the questions inline and asks for approval. `approve` then
+runs until PROJECT COMPLETE or a pause. `new --auto-approve --background` plans and builds
+on the planner's recommendations without you; every choice it makes is logged as an
+AUTONOMOUS DECISION for review.
+
+### An existing repo with a PRD and a CLAUDE.md
+
+```
+cd ~/src/existing
+agent-bridge init            # writes bridge.toml; never overwrites it
+agent-bridge check           # no model calls
+agent-bridge approve --no-run
+agent-bridge run --forever --kickoff "Start with ..."
+```
+
+### Choosing engines
+
+Every role defaults to Claude Code: planner `claude-fable-5-1` at `max` effort,
+supervisor `claude-fable-5-1` at `xhigh`, builder `claude-opus-5-5`. Override per role
+with `ENGINE:MODEL` on `init` or `new`. These three combinations were set up with `init`
+and passed `check` on this machine:
+
+| Combination | Flags | Supervisor read-only |
+|---|---|---|
+| all Claude Code (default) | none | enforced: `--tools Read,Grep,Glob` |
+| Claude Code planner and supervisor, opencode builder | `--builder opencode:anthropic/claude-opus-5-5` | enforced |
+| all opencode | `--planner opencode:anthropic/claude-fable-5-1 --supervisor opencode:anthropic/claude-fable-5-1 --builder opencode:anthropic/claude-opus-5-5` | **read-only by instruction only** |
+
+- With any opencode role, `init` picks a free port for `[opencode] port`, and adds `.omo/`
+  to `.gitignore`. The bridge starts `opencode serve` on that port, or uses one already
+  running there.
+- On opencode, read-only cannot be enforced. `status` says "read-only by instruction
+  only"; any write or shell call by the supervisor or planner, and any repo change during
+  its turn, goes to `.bridge/review.log`.
+- A role on a non-default model gets no effort setting unless you set `variant` in
+  `bridge.toml`.
+
+### Day to day
+
+| Command | What it does |
+|---|---|
+| `status` | state, sessions, read-only per role, warnings |
+| `logs -f` | follow the live event stream |
+| `say "..."` | an owner message, given verbatim to both agents at the next exchange |
+| `stop` / `stop --now` | stop at the next step boundary / abort the running turn too |
+| `review` | your to-do: autonomous decisions, OWNER-BLOCKED items, waiting plan changes |
+| `decide docs/OWNER_REVIEW.md` | apply your decisions through the planner, then continue |
+| `report` | the owner-review report (also written at PROJECT COMPLETE) |
+| `pin --builder ID` / `pin --new-builder` | adopt or reset a session |
+
+Everything lives in `.bridge/`: `loop.log` holds every message as delivered,
+`review.log` holds the warnings, and `state.json` lets a stopped run resume where it
+left off.
+
+## Billing
+
+- **Claude Code roles bill your Claude subscription (the Max plan).** By default
+  (`billing.mode = "subscription"`) the bridge removes `ANTHROPIC_API_KEY` and
+  `ANTHROPIC_AUTH_TOKEN` from every child process, and refuses a turn that Claude Code
+  reports as using an API key.
+- **Third-party harnesses such as opencode may bill differently.** Anthropic can bill
+  subscription use through third-party apps as extra usage, depending on your plan and
+  login. Check your account before running long jobs on opencode.
+- **API-key mode is supported:** set `billing.mode = "api-key"` in `bridge.toml` (an
+  owner-only setting; the planner may not change it). The key is then passed through,
+  and a Claude Code turn served by the subscription login is refused.
+
+## Known limitations
+
+- **Read-only on opencode is by instruction only.** It is audited, not enforced.
+- **The builder can still act outside the repo.** A builder write under your home folder
+  outside the repo pauses the run, but only after the turn: the bridge sees tool calls
+  once they ran. This was found live (INVENTORY L22). The fix is tested with fakes only;
+  a live opencode re-check is OPEN-003.
+- **Commit trailers are detected, not prevented.** In the final smoke test a Haiku
+  builder added `Co-Authored-By` despite the rules; the bridge logged `COMMIT
+  ATTRIBUTION`. Nothing rewrites history.
+- **Phases must be `Phase N` headings** for the bridge to track them (current phase,
+  the all-phases-verified hint). Phase plans in tables work for the supervisor, but
+  without those two aids.
+- **opencode 2.x is not supported.** The flags this uses were removed there.
+- **Shared logins.** If the `claude` login expires mid-run, the bridge pauses with "run
+  `claude login`". It never logs in for you.
+- **Live testing so far was on Haiku only,** in small temporary repos. The default
+  Fable and Opus models have not run a full loop under agent-bridge.
+- **Migration** of existing projects is documented in `docs/MIGRATION.md` and has not
+  been performed.
