@@ -940,7 +940,7 @@ model = "claude-opus-5-5"                # on opencode: "anthropic/claude-opus-5
 timeout = "3h"
 
 # [opencode]                             # only when a role uses opencode
-# port = 4096                            # one server per project; init picks a free one
+# port = 4099                            # required then (no default; DEC-001); one per project; init picks a free one
 # accept = "1.18"
 
 [billing]
