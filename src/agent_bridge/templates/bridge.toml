@@ -1,0 +1,66 @@
+# bridge.toml: agent-bridge configuration, written by `agent-bridge init` on $created.
+# A running bridge reads this file only when it starts. Unknown keys are errors.
+version = 1
+
+[project]
+name = $name
+repo = "."                               # relative to this file
+prd = $prd
+rules = [$rules]                         # AGENTS.md should be a symlink to CLAUDE.md
+decisions = $decisions                   # the decision ledger
+open_items = $open_items
+results = $results                       # the builder's results register (development vs real)
+mode = "autonomous"                      # autonomous | escalate
+$worklog_line
+# phases = "PRD section 14"              # where the phase plan is, if not under "Phase" headings
+# supervisor_rules = "docs/SUPERVISOR.md"   # extra supervisor principles
+# env_file = ".env"                      # opt-in; loaded into the builder's environment only
+
+# Each role picks its engine (claude-code | opencode) and model. Planner and supervisor
+# are always read-only; on opencode that is by instruction only.
+[planner]
+engine = $planner_engine
+model = $planner_model
+$planner_variant_line
+timeout = $planner_timeout
+
+[supervisor]
+engine = $supervisor_engine
+model = $supervisor_model
+$supervisor_variant_line
+timeout = $supervisor_timeout
+
+[builder]
+engine = $builder_engine
+model = $builder_model                   # on opencode, a bare id gets "anthropic/"
+$builder_variant_line
+timeout = $builder_timeout
+
+$opencode_block
+
+[billing]
+mode = "subscription"                    # subscription | api-key   (owner-only setting)
+
+[git]
+push = "never"                           # never | allowed          (owner-only setting)
+
+[waits]
+max = "24h"                              # longest WAIT before the supervisor gets a turn
+
+[budget]                                 # reaching a cap pauses the run with a summary
+# max_exchanges = 300                    # per `run` invocation
+# max_wall_time = "72h"                  # per `run` invocation, waits included
+max_unchanged_exchanges = 12             # consecutive exchanges with no repo change, outside waits
+max_replans_per_phase = 3
+
+[rotation]
+builder_max_context_tokens = 600_000
+builder_on_phase_complete = true         # fresh builder session at the supervisor's PHASE COMPLETE
+supervisor_max_context_tokens = 400_000
+supervisor_on_phase_complete = true
+planner_max_context_tokens = 400_000
+phase_complete_pattern = '(?i)\bphase\s+[\w.-]+\s+(?:is\s+)?complete\b'   # builder claims: a hint only
+
+[safety]
+danger_commands = []                     # extra regexes over the builder's shell commands
+caffeinate = true                        # macOS: keep the machine awake while running
