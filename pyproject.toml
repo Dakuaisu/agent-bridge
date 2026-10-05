@@ -24,4 +24,5 @@ agent_bridge = ["templates/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
 addopts = "-q"
