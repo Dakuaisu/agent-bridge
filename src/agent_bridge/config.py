@@ -423,7 +423,9 @@ def render_config_template(
     chosen.update(roles or {})
     for role in ROLES:
         engine, model = chosen[role]
-        variant = ROLE_DEFAULTS[role]["variant"]
+        default = ROLE_DEFAULTS[role]
+        # Effort levels are model-specific: the default effort only goes with the default model.
+        variant = default["variant"] if (engine, model) == (default["engine"], default["model"]) else None
         values[f"{role}_engine"] = toml_str(engine)
         values[f"{role}_model"] = toml_str(model)
         values[f"{role}_variant_line"] = (

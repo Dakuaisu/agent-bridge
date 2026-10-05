@@ -195,3 +195,10 @@ def test_template_with_an_opencode_role(repo: Path) -> None:
 def test_config_from_dict_matches_load(repo: Path) -> None:
     cfg = config_from_dict({"version": 1, "project": {"name": "n"}}, repo / "bridge.toml")
     assert cfg.project.name == "n"
+
+
+def test_template_drops_the_default_effort_for_a_custom_model(repo: Path) -> None:
+    text = render_config_template(name="x", created="now", roles={"supervisor": ("claude-code", "claude-haiku-4-5-20251001")})
+    cfg = load_config(write(repo, text))
+    assert cfg.role("supervisor").variant is None
+    assert cfg.role("planner").variant == "max"
