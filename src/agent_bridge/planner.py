@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_bridge import contract, prompts
-from agent_bridge.backends.base import BackendError
+from agent_bridge.backends.base import BackendError, select_text
 from agent_bridge.clock import iso
 from agent_bridge.config import ROLES, ConfigError, config_from_dict, load_config
 from agent_bridge.engine import EXIT_OK, EXIT_PAUSED, EXIT_UNSUPPORTED, Engine, new_pending
@@ -148,7 +148,7 @@ class ContractEngine(Engine):
         self.j.transcript("PLANNER | planner reply", reply.text)
         for key in ("timeouts_planner", "questions_planner", "errors_planner", "limit_sleep_s"):
             self.st.counters.pop(key, None)
-        out = parse_planner(reply.text)
+        out = parse_planner(select_text(reply, ("QUESTIONS:", "PLAN:", "CHANGE:", "NO CHANGE:")))
         self.j.event("planner_output", form=out.kind, errors=out.errors)
         return out
 

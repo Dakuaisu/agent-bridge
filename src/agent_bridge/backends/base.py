@@ -106,6 +106,22 @@ class Reply:
     context_tokens: int | None = None
     duration_s: float = 0.0
     raw_path: Path | None = None
+    steps: list[str] = field(default_factory=list)
+
+
+def select_text(reply: Reply, markers: tuple[str, ...]) -> str:
+    """The last step that carries a form marker (DESIGN 5.5); a VERDICT from an earlier step is kept."""
+    if not reply.steps:
+        return reply.text
+    chosen = next((i for i in range(len(reply.steps) - 1, -1, -1) if any(m in reply.steps[i] for m in markers)), None)
+    if chosen is None:
+        return reply.text
+    text = reply.steps[chosen]
+    if "REPLY:" in markers and "VERDICT:" not in text:
+        earlier = [ln for step in reply.steps[:chosen] for ln in step.splitlines() if ln.strip().lstrip("*#- ").startswith("VERDICT:")]
+        if earlier:
+            text = earlier[-1].strip() + "\n" + text
+    return text
 
 
 class CancelToken(Protocol):

@@ -27,6 +27,7 @@ from agent_bridge.backends.base import (
     Timeout,
     TransientError,
     Unsupported,
+    select_text,
 )
 from agent_bridge.clock import Clock, iso
 from agent_bridge.config import Config, format_duration
@@ -651,8 +652,8 @@ class Engine:
             self._last_supervisor_context = reply.context_tokens
             self._tripwire("supervisor", reply, before, after)
             self._check_models("supervisor", reply)
-            text = reply.text
-            self.j.transcript(f"EXCHANGE {n} | supervisor reply", text)
+            text = select_text(reply, ("REPLY:", "PROJECT COMPLETE"))
+            self.j.transcript(f"EXCHANGE {n} | supervisor reply", reply.text)
             out = parse_supervisor(text, now=self.now())
             if not text.strip():
                 nudge = "empty"
