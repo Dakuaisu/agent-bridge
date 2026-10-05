@@ -34,3 +34,14 @@ Status: OPEN, OWNER-BLOCKED or RESOLVED.
   2. Then `git -C ~/src/opencode-claude-bridge branch -D agent-bridge-smoke-accident-20261006`
      and `rm -rf /tmp/agent-bridge-smoke-accident-backup-20261006`.
   3. To undo the repair instead: `git reset --soft agent-bridge-smoke-accident-20261006`.
+
+## OPEN-003 Verify the opencode builder's repo rule live
+- Status: OWNER-BLOCKED
+- What: the fix for L22 (the builder working in another repo) is tested only with fakes:
+  - the absolute-path rule in every builder message;
+  - the outside-repo pause.
+- Why it waits: a live re-run of `scripts/smoke.sh opencode` could again make the
+  builder treat `~/src/opencode-claude-bridge`, which holds uncommitted work, as its
+  working directory. It needs the owner present.
+- Next (owner): commit or stash the work in `~/src/opencode-claude-bridge`, run
+  `scripts/smoke.sh opencode`, then check that repo with `git status`.

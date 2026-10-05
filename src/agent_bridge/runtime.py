@@ -204,7 +204,7 @@ def import_legacy(sd: StateDir, cfg: Config, state: State) -> list[str]:
             if cfg.role(role).engine != "opencode":
                 notes.append(f"{name}: {sid} is an opencode session but [{role}] uses {cfg.role(role).engine}; not adopted")
                 continue
-            state.sessions[role] = {"engine": "opencode", "id": sid, "started": now, "closed": False, "adopted": True}
+            state.sessions[role] = {"engine": "opencode", "id": sid, "started": now, "closed": False, "adopted": True, "needs_role": role == "supervisor"}
             registry.append({"role": role, "engine": "opencode", "id": sid, "title": "(adopted from the old bridge)", "directory": str(cfg.project.repo), "created": now, "retired": None, "adopted": True})
             notes.append(f"adopted the old {role} session {sid}")
     atomic_write_json(sd.sessions, registry)

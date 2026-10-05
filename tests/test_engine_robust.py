@@ -378,3 +378,18 @@ def test_builder_reading_elsewhere_is_only_reported(repo: Path, clock: FakeClock
     eng.kickoff("go")
     assert eng.run() == 0
     assert "BUILDER READ OUTSIDE THE REPO at exchange 0" in review_log(repo)
+
+
+def test_an_adopted_supervisor_session_gets_the_role_once(repo: Path, clock: FakeClock) -> None:
+    from agent_bridge.statedir import atomic_write_json
+
+    eng = make_engine(repo, clock, builder=["r0", "r1", "r2"], supervisor=[ok("go"), ok("again"), DONE])
+    eng.st.sessions["supervisor"] = {"engine": "fake", "id": "ses_old", "closed": False, "adopted": True, "needs_role": True}
+    eng.save()
+    eng = make_engine(repo, clock, builder=["r0", "r1", "r2"], supervisor=[ok("go"), ok("again"), DONE])
+    eng.kickoff("go")
+    eng.run()
+    sent = eng.backends["supervisor"].sent
+    assert eng.backends["supervisor"].sessions_started == 0
+    assert "ROLE FOR THIS ENTIRE SESSION" in sent[0]
+    assert "ROLE FOR THIS ENTIRE SESSION" not in sent[1] and "Reminder:" in sent[1]

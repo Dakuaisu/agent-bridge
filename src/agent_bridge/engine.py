@@ -647,7 +647,9 @@ class Engine:
         if rotate_reason:
             self.retire_session("supervisor", rotate_reason)
             st.handoff["supervisor"] = rotate_reason
-        new_session = backend.session_id is None
+        # An adopted session (pin, or the old bridge's) has never seen this bridge's role text.
+        refresh = bool((st.sessions.get("supervisor") or {}).get("needs_role"))
+        new_session = backend.session_id is None or refresh
         if new_session:
             backend.system_prompt = prompts.supervisor_role(self.cfg, self.enforcement["supervisor"], self._supervisor_rules_text())
         message, _ = self.supervisor_message(new_session=new_session)
@@ -660,6 +662,8 @@ class Engine:
             self.save()
             return out
         st.handoff.pop("supervisor", None)
+        if (st.sessions.get("supervisor") or {}).get("needs_role"):
+            st.sessions["supervisor"]["needs_role"] = False
         st.supervisor_notes = []
         for item in st.owner_queue:
             if item["to_supervisor"]:

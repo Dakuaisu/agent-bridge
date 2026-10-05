@@ -484,7 +484,7 @@ def cmd_pin(a: argparse.Namespace) -> int:
             raise runtime.UsageError(f"{role}: cannot find session {sid} to check that it belongs to {repo}; pass --force to pin it anyway")
         if directory is not None and directory not in expected:
             raise runtime.UsageError(f"{role}: session {sid} belongs to {directory}, not this repo; refusing to pin it")
-        st.sessions[role] = {"engine": backend.engine, "id": sid, "started": iso(now()), "closed": False, "adopted": True}
+        st.sessions[role] = {"engine": backend.engine, "id": sid, "started": iso(now()), "closed": False, "adopted": True, "needs_role": role == "supervisor"}
         registry = read_json(sd.sessions, default=[]) or []
         registry.append({"role": role, "engine": backend.engine, "id": sid, "title": "(pinned)", "directory": directory, "created": iso(now()), "retired": None, "adopted": True})
         atomic_write_json(sd.sessions, registry)
