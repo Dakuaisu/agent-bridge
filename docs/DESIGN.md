@@ -1,40 +1,82 @@
 # agent-bridge design
 
-Status: proposal, for review before any code is written. The failure IDs (L1–L21,
-C1–C6) refer to `docs/INVENTORY.md`.
+Status: v2 (2026-10-06), revised after the owner's answers:
+- `bridge.toml`, read with `tomllib`;
+- Claude Code as the default supervisor;
+- labelled origins;
+- a third role, the planner.
+
+Code starts once the owner confirms this version. The failure IDs (L1–L21, C1–C6) refer
+to `docs/INVENTORY.md`.
 
 ## 1. Goals
 
-- One tool, installed once, that runs a builder and a supervisor against any repo:
-  a `bridge.yaml` per project, no per-project Python.
-- Either role on either backend (opencode 1.18.x or Claude Code), in any combination.
-- Safe to leave alone for days. Every stop, wait, pause and warning is visible in
-  `status` and in the logs. It never loops on a hard error, and it never makes model
-  calls just to pass time (L1).
-- Everything that worked in the three copies is kept (INVENTORY §5). Every failure
-  in INVENTORY §3 has a mechanism and a test.
+- One tool, installed once, that plans, builds and supervises work in any repo: one
+  `bridge.toml` per project, no per-project Python.
+- Three roles (planner, supervisor, builder). Each runs on either engine (opencode
+  1.18.x or Claude Code) with its own model, in any combination.
+- The plan is the contract. The owner approves `docs/PRD.md` and `CLAUDE.md` before
+  anything is built. After that the plan changes only through the planner, and
+  materially only with the owner.
+- An honest audit trail. Every message records who wrote it, every decision records who
+  made it, and the logs keep both.
+- Safe to leave alone for days. It never loops on a hard error, never makes model calls
+  just to pass time (L1), and every stop, wait, pause and warning shows in `status` and
+  the logs.
+- Everything that worked in the three copies is kept (INVENTORY §5). Every failure in
+  INVENTORY §3 has a mechanism and a test.
+- Zero runtime dependencies.
 
-Non-goals: a TUI, multiple builders, remote machines, managing opencode installs, and
-deleting sessions (the tool records the sessions it creates and never deletes any).
+Non-goals: a TUI, several builders, remote machines, managing opencode installs, and
+deleting sessions (the tool records the sessions it creates and never deletes one).
 
-## 2. Architecture
+## 2. Roles and origins
+
+| Role | Job | Writes | Read-only on Claude Code | Read-only on opencode |
+|---|---|---|---|---|
+| **planner** | interviews the owner; writes the contract; answers re-plan requests and owner decisions | only the planning docs, and only through the bridge (section 6) | enforced: it gets no write tools | read-only by instruction only |
+| **supervisor** | reviews every builder turn against the contract and the repo; writes the builder's next instruction | nothing | enforced: `--tools Read,Grep,Glob` | read-only by instruction only |
+| **builder** | does the work: code, tests, commits, ledger entries, open items | the repo, except the contract files | — | — |
+
+- Read-only is a property of the role, not a setting: a writable planner or supervisor
+  would break the audit model. `check`, `status` and the start banner print how it is
+  enforced for each role. On opencode the text is exactly "read-only by instruction
+  only", with the tripwire and tool-call audit running behind it.
+- The bridge itself writes only:
+  - `.bridge/`;
+  - the planner's validated files;
+  - its generated block in `CLAUDE.md`, the `AGENTS.md` symlink, and the `.bridge/` line
+    in `.gitignore`;
+  - the bookkeeping lines of ledger entries (6.5).
+
+  It never commits, pushes or edits git config.
+- **Every block of every message carries its origin:** `[owner]`, `[planner]`,
+  `[supervisor]` or `[bridge]`. Nobody writes as the developer. `[bridge]` text is
+  automated and never adds scope (L11, L12).
+- `loop.log` records each message exactly as delivered, labels included.
+  `events.jsonl` records the origin and recipient of every block.
+
+## 3. Architecture
 
 ```
 agent_bridge/
-  cli.py          argparse entry point; one function per command
-  config.py       load and validate bridge.yaml into frozen dataclasses
+  cli.py          one function per command
+  config.py       bridge.toml via tomllib, validated into frozen dataclasses
   statedir.py     .bridge/ layout, atomic JSON writes, lock, inbox, STOP
   journal.py      events.jsonl (structured), loop.log, review.log, console.log
-  engine.py       the loop: a persisted state machine (section 5)
-  protocol.py     parse supervisor output and builder reports; compose messages
-  prompts.py      role text, notes, handoffs: generic text plus config and repo docs
+  engine.py       the loop: a persisted state machine (section 7)
+  planner.py      interview, drafting, re-planning, owner decisions, plan changes
+  contract.py     contract hashes and drift, the generated CLAUDE.md block, ledger writes
+  protocol.py     parse each role's output; compose labelled messages
+  prompts.py      role texts and notes: generic text plus config and repo docs
   waits.py        WaitSpec and its conditions (UNTIL, FOR PID, FOR FILE)
   limits.py       reset-time parsing for every observed limit message
   repo.py         git: fingerprint, delta, new commits, trailer and push checks
   budget.py       caps and the pause summary
-  owner.py        review (owner to-do), the decisions template, apply-decisions, new
+  owner.py        review (owner to-do) and the OWNER_REVIEW.md template
   live.py         renderers shared by foreground run, `logs -f` and `status`
   clock.py        Clock protocol (real, and fake for tests)
+  templates/      bridge.toml, the CLAUDE.md block, OWNER_REVIEW.md (text templates)
   backends/
     base.py       Backend, Reply, Capabilities, errors
     opencode.py   OpencodeBackend and OpencodeServer
@@ -42,27 +84,29 @@ agent_bridge/
     fake.py
 ```
 
-Single-threaded engine. Each backend turn runs a subprocess whose stdout is read by a
-reader thread (streaming events to the journal and the live view), plus, for opencode,
-a monitor thread that polls the server (section 3.2). The engine thread waits on the
-turn with a deadline and a cancel flag (set by `stop --now` or a detected question or
-limit).
+Single-threaded engine:
+- Each agent turn runs a subprocess. A reader thread reads its stdout and streams events
+  to the journal and the live view.
+- For opencode, a monitor thread also polls the server (4.2).
+- The engine waits on the turn with a deadline and a cancel flag. The flag is set by
+  `stop --now`, a detected question, or a detected limit.
 
-## 3. Backends
+## 4. Engines
 
-### 3.1 Interface
+"Engine" is the config word; `Backend` is its interface in the code.
+
+### 4.1 Interface
 
 ```python
 @dataclass(frozen=True)
 class Capabilities:
-    read_only: str          # "enforced: --tools Read,Grep,Glob" or
-                            # "instruction-only, with repo tripwire and tool-call audit"
+    read_only: str          # "enforced: --tools Read,Grep,Glob" | "read-only by instruction only"
     question_guard: str     # how an interactive question is prevented or caught
     live_attach: str | None # e.g. "opencode attach http://127.0.0.1:4096 --dir … --session …"
 
 @dataclass
 class Reply:
-    text: str               # builder: all text parts in order; supervisor: see 4.3
+    text: str               # builder: all text parts in order; others: see 5.5
     session_id: str
     served_models: set[str]
     tool_calls: list[ToolCall]   # name, input summary (command, path), ok/error
@@ -97,66 +141,67 @@ Normalized errors (all subclass `BackendError`):
 
 A backend never retries; the engine owns every retry and sleep decision.
 
-### 3.2 OpencodeBackend (1.18.x)
+### 4.2 OpencodeBackend (1.18.x)
 
 - **Version gate.** `opencode --version` must match `opencode.accept` (default `1.18`).
-  Anything else raises `Unsupported` before any model call, explaining why 2.x is
-  refused (no `--attach`/`--dir`, the omo plugin cannot load, Anthropic bills
-  third-party apps from extra usage) and how to pin 1.18.30. It warns if
+  Anything else raises `Unsupported` before any model call. The message explains why
+  2.x is refused (no `--attach`/`--dir`, the omo plugin cannot load, Anthropic bills
+  third-party apps from extra usage) and how to pin 1.18.30. It also warns if
   `~/.config/opencode/opencode.jsonc` lacks `"autoupdate": false`. Any "Unrecognized
   flag" in stderr is `Unsupported`, never transient (L6).
-- **Server.** One `opencode serve --hostname 127.0.0.1 --port <port>` per project,
-  cwd = repo, started detached (`start_new_session=True`) so it outlives the bridge.
-  Output is appended to `serve.log` with a timestamped start marker. If the port is
-  already open, `GET /global/health` must answer as opencode with an accepted version;
-  otherwise the bridge stops with a message and touches nothing. The bridge never
-  stops a server.
+- **Server.**
+  - One `opencode serve --hostname 127.0.0.1 --port <port>` per project, with cwd =
+    repo, started detached (`start_new_session=True`) so it outlives the bridge.
+  - Its output is appended to `serve.log` with a timestamped start marker.
+  - If the port is already open, `GET /global/health` must answer as opencode with an
+    accepted version. Otherwise the bridge stops with a message and touches nothing.
+  - The bridge never stops a server.
 - **Turn.** `opencode run --attach URL --dir REPO --format json --auto -m PROVIDER/MODEL
-  [--variant V] (--session ID | --title "<project> <role> <date>") -- MESSAGE`. Every
-  message starts with a `[bridge]` line, so it can never begin with `-`. The `--`
-  separator is used if the smoke test confirms 1.18.30 accepts it. JSON events
-  (`step_start`, `text`, `tool_use`, `step_finish`, `error`) are streamed. The session
-  id is persisted from the first event, not at the end.
-- **New sessions are created by `opencode run`**, which gives them the `question`,
-  `plan_enter` and `plan_exit` deny rules (L5). A session adopted with `pin` lacks
-  those rules; `pin` and `status` say so.
-- **Monitor thread** (every 15 s while a turn runs):
+  [--variant V] (--session ID | --title "<project> <role> <date>") -- MESSAGE`.
+  - Every message starts with a labelled line, so it can never begin with `-`. The `--`
+    separator is used if the smoke test confirms 1.18.30 accepts it.
+  - JSON events (`step_start`, `text`, `tool_use`, `step_finish`, `error`) are streamed.
+  - The session id is persisted from the first event, not at the end.
+- **New sessions are created by `opencode run`.** That gives them the `question`,
+  `plan_enter` and `plan_exit` deny rules (L5). A session adopted with `pin` lacks those
+  rules; `pin` and `status` say so.
+- **Monitor thread,** every 15 s while a turn runs:
   - `GET /question?directory=REPO`: a question for this session or its children is
-    rejected (`POST /question/{id}/reject`), the session aborted, and `QuestionAsked`
-    raised.
-  - `GET /session/status?directory=REPO`: status `retry` whose `next` is more than 5
+    rejected (`POST /question/{id}/reject`), the session is aborted, and `QuestionAsked`
+    is raised.
+  - `GET /session/status?directory=REPO`: a `retry` status whose `next` is more than 5
     minutes away, or whose message matches a limit pattern ("pool exhausted", "usage
     limit", "rate limit"), aborts the turn and raises `SessionLimit(reset_at=next)` or
     `RateLimited` (L2). Shorter retries are left to opencode.
   - New `serve.log` lines since the turn began are matched for limit and 401 messages
     ("next account free in 1h 45m", "Account usage window rejected … resets in N
     seconds"), as a second source for the same classification.
-- **Abort for real.** Timeout, cancel, question or limit: `POST
-  /session/{id}/abort?directory=REPO`, then end the client (SIGTERM, then SIGKILL
-  after 30 s). Before every send the session's status is read; a busy session is
-  aborted first, so retries never stack as queued messages (L4).
+- **Abort for real.** On timeout, cancel, question or limit: `POST
+  /session/{id}/abort?directory=REPO`, then end the client (SIGTERM, then SIGKILL after
+  30 s). Before every send the session's status is read, and a busy session is aborted
+  first, so retries never stack up as queued messages (L4).
 - **Reply text.** Builder: every `text` part in order, which matches the old default
-  output. Supervisor: section 4.3.
-- **Served model.** Assistant messages created during the turn are read from
+  output. Planner and supervisor: 5.5.
+- **Served model.** The assistant messages created during the turn are read from
   `opencode.db` with `sqlite3` in `mode=ro` (URI) plus `PRAGMA query_only`. The session
   id is validated against `^ses_[A-Za-z0-9]+$` and passed as a bound parameter.
-- **Context size.** From the `tokens` on the last `step_finish` event, falling back to
-  the DB.
-- **Read-only.** Instruction-only: the claude-bridge plugin overrides permission
-  denies, so read-only cannot be enforced. It is backed by the repo delta and the
-  supervisor's own `tool_use` events (any `write`, `edit`, `patch` or `bash` call by a
-  read-only role goes to `review.log`).
+- **Context size.** From the `tokens` on the last `step_finish` event, with the DB as
+  fallback.
+- **Read-only: "read-only by instruction only".** The claude-bridge plugin overrides
+  permission denies, so read-only cannot be enforced on this engine. It is backed by the
+  repo delta and by the role's own `tool_use` events: any `write`, `edit`, `patch` or
+  `bash` call by a planner or supervisor goes to `review.log`.
 - **Agents.** Never passes `--agent` (omo drops custom agents and falls back to
-  Sisyphus). The role travels in the message; the model is set with `-m`. Never
+  Sisyphus). The role travels in the message and the model is set with `-m`. Never
   `--pure` (401).
 - **Unverified so far.** The routes (`/global/health`, `/session/status`, `/question`,
   `/question/{id}/reject`, `/session/{id}/abort`) and the `retry` status shape
   (`attempt`, `message`, `next`) come from the 1.18.30 binary. The smoke test checks
   their response shapes against a live server before the backend relies on them.
 
-### 3.3 ClaudeCodeBackend
+### 4.3 ClaudeCodeBackend
 
-- **Turn.** The prompt is passed on stdin.
+- **Turn.** The prompt is passed on stdin:
 
   ```
   claude -p --output-format stream-json --verbose --model MODEL [--effort V]
@@ -165,78 +210,80 @@ A backend never retries; the engine owns every retry and sleep decision.
   ```
 
   - Builder: cwd = repo, `--permission-mode bypassPermissions` (the counterpart of
-    opencode's `--auto`), `--disallowedTools AskUserQuestion`. With `git.push: never`,
-    `--settings` adds deny rules for `git push`. The smoke test checks whether deny
-    rules hold under `bypassPermissions`; if they do not, no-push stays an instruction
-    backed by detection, and `check` says so.
-  - Read-only role: `--tools Read,Grep,Glob --allowedTools Read,Grep,Glob`. This is
-    enforced.
-  - Supervisor cwd: a neutral per-project directory outside the repo
-    (`~/.local/state/agent-bridge/<project-id>/supervisor/`) with `--add-dir REPO`.
-    That keeps the builder's `CLAUDE.md` out of the supervisor's context (the same
-    lesson as FillingQA's `claude_cli` generator). The smoke test confirms reads
-    through `--add-dir` work; if they do not, the fallback is cwd = repo, as in the old
-    claude path.
+    opencode's `--auto`), `--disallowedTools AskUserQuestion`. With `git.push = "never"`,
+    `--settings` adds deny rules for `git push`. The smoke test checks whether deny rules
+    hold under `bypassPermissions`; if they do not, no-push stays an instruction backed by
+    detection, and `check` says so.
+  - Planner and supervisor: `--tools Read,Grep,Glob --allowedTools Read,Grep,Glob`. This
+    is enforced.
+  - Planner and supervisor cwd: a neutral per-role directory outside the repo
+    (`~/.local/state/agent-bridge/<project-id>/<role>/`), with `--add-dir REPO`. That keeps
+    the builder's `CLAUDE.md` out of their context, the same lesson as FillingQA's
+    `claude_cli` generator. The smoke test confirms that reads through `--add-dir` work;
+    if not, the fallback is cwd = repo, as in the old claude path.
 - **Sessions.** The bridge generates the UUID and persists it before the first call,
   then uses `--resume UUID`. Session files live under `~/.claude/projects/`, keyed by
   cwd, so each role always runs from the same cwd.
-- **Environment.** `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are removed unless
-  `billing: api-key`. `CLAUDECODE` and related variables are removed so a bridge
-  launched from a Claude Code terminal is not treated as nested. The `system/init`
-  event's `apiKeySource` is checked against the billing mode; a mismatch is
-  `Unsupported` (it would bill the wrong account).
+- **Environment.**
+  - `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` are removed unless
+    `billing.mode = "api-key"`.
+  - `CLAUDECODE` and related variables are removed, so a bridge launched from a Claude
+    Code terminal is not treated as nested.
+  - The `system/init` event's `apiKeySource` is checked against the billing mode. A
+    mismatch is `Unsupported`: it would bill the wrong account.
 - **Errors.** A `result` with `is_error` is classified:
-  - limit text ("You've hit your session limit · resets 9:40pm (Asia/Calcutta)",
-    "usage limit reached", weekly variants): `SessionLimit`, with the reset time parsed
-    by `limits.py`;
-  - 401, "invalid api key", "please run /login", "OAuth token expired": `AuthFailed`;
-  - 429 or overloaded: `RateLimited`;
-  - anything else: `TransientError`.
+  - limit text ("You've hit your session limit · resets 9:40pm (Asia/Calcutta)", "usage
+    limit reached", weekly variants) is `SessionLimit`, with the reset parsed by
+    `limits.py`;
+  - 401, "invalid api key", "please run /login" or "OAuth token expired" is
+    `AuthFailed`;
+  - 429 or overloaded is `RateLimited`;
+  - anything else is `TransientError`.
 
   A timeout kills the process group. There is no server-side turn.
-- **Health.** `claude --version`; `claude auth status` (JSON: `loggedIn`, `authMethod`,
-  `subscriptionType`), which makes no model call.
-- **Served model.** `message.model` on each assistant event. `modelUsage` is not used
-  for this, because Claude Code also calls small models for housekeeping.
+- **Health.** `claude --version`, and `claude auth status` (JSON: `loggedIn`,
+  `authMethod`, `subscriptionType`), which makes no model call.
+- **Served model.** `message.model` on each assistant event. `modelUsage` is not used,
+  because Claude Code also calls small models for housekeeping.
 - **No SDK.** The Claude Agent SDK drives this same CLI. Calling the CLI directly keeps
-  the tool stdlib-only.
+  the tool dependency-free.
 
-### 3.4 FakeBackend
+### 4.4 FakeBackend
 
-Scripted from a list of steps or a callable: a reply (text, served model, tool calls,
-context tokens, optional file changes applied to the temp repo), or an error to raise,
-optionally after advancing the fake clock. It records every message it was sent, so
-tests can assert on labels, notes and ordering. It is the only backend the test suite
-calls. Subprocess plumbing (timeouts, aborts, streaming) is tested with fake
-`opencode` and `claude` executables and a stdlib `http.server` standing in for the
-opencode server.
+- Scripted from a list of steps or a callable. A step is either a reply (text, served
+  model, tool calls, context tokens, optional file changes applied to the temporary
+  repo) or an error to raise, optionally after advancing the fake clock.
+- It records every message it was sent, so tests can assert on labels, notes and order.
+- It is the only engine the test suite calls.
+- Subprocess plumbing (timeouts, aborts, streaming) is tested separately, with fake
+  `opencode` and `claude` executables and a stdlib `http.server` standing in for the
+  opencode server.
 
-## 4. Message protocol
+## 5. Message protocol
 
-### 4.1 Sources are labelled (L11, L12)
+### 5.1 Message layout
 
-Every message carries labelled blocks, so neither agent mistakes bridge text for an
-owner instruction.
-
-Builder message, in this order (empty blocks omitted):
+Builder message (empty blocks omitted):
 
 ```
 [bridge] Headless run: never use a question or ask-user tool; put questions under
 DECISIONS NEEDED. To pause for a job or a time, end your report with one line:
 WAIT FOR PID <n> | WAIT FOR FILE <path> | WAIT UNTIL <ISO-8601 time>.
-[owner] (verbatim; binding; the supervisor has it too)
+[owner] (verbatim; binding)
 <owner text>
+[planner] <the kickoff, or a plan change: summary, DEC id, diff path>
 [bridge] <one note: resume after timeout | question rejected | wait over | cut off by a
-usage limit | fresh session handoff>
+usage limit | fresh-session handoff | contract file changed>
 [supervisor]
 <the supervisor's REPLY>
 ```
 
-Supervisor message per turn:
+Supervisor message, each turn:
 
 ```
 [bridge] You are the read-only SUPERVISOR of <project> (<how read-only is enforced>).
-Absolute paths under <repo> only. Output VERDICT, optional directive lines, REPLY.
+The contract is docs/PRD.md and CLAUDE.md, approved <date> (<short hashes>). Absolute
+paths under <repo> only. Output VERDICT, optional directive lines, REPLY.
 [bridge] Re-verify the builder's claims against the repo this turn. Your memory of
 earlier turns is context, not evidence.
 [bridge] Since your last turn: HEAD a1b2c3d..e4f5a6b (3 commits: <subjects>); working
@@ -244,15 +291,25 @@ tree: 2 modified, 1 untracked. Builder turn: 41m, ended normally.
 [bridge] The builder asked for: WAIT FOR PID 64410. It is honoured after your reply
 unless you write NO WAIT or a different WAIT line.
 [bridge] The builder listed 2 DECISIONS NEEDED; answer each in your REPLY.
-[owner] (verbatim; binding; already delivered to the builder) <owner text>
-===== BUILDER =====
-<builder report, last 24,000 chars; the full text is in the turn file>
+[owner] / [planner] (verbatim) every block the builder received from someone other than
+you since your last turn, so you always know what it was told (L11)
+===== BUILDER REPORT =====
+<the last 24,000 chars; the full text is in the turn file>
 ===== END =====
 ```
 
-The first supervisor message of a session also carries the role (section 6.3).
+Planner message:
 
-### 4.2 Supervisor output grammar
+```
+[bridge] You are the PLANNER of <project> … (the role, in a session's first message)
+[owner] <the idea | the interview answers | the decisions doc>
+[supervisor] REPLAN: <problem>, with its VERDICT and the builder report it was reviewing
+[bridge] <contract hashes, current phase, waiting plan changes, re-plans so far this phase>
+```
+
+The first message of every session also carries the role text (8.3).
+
+### 5.2 Supervisor output grammar
 
 ```
 [optional preamble]
@@ -263,7 +320,8 @@ WAIT FOR PID <n>             [MAX <duration>]
 WAIT FOR FILE <path>         [MAX <duration>]
 NO WAIT
 ROTATE BUILDER
-ESCALATE: <question>                  honoured only in mode: escalate
+REPLAN: <what in the plan is wrong or blocked, with evidence>
+ESCALATE: <question>                  honoured only in mode = "escalate"
 REPLY:
 <message for the builder>
 ```
@@ -272,142 +330,410 @@ REPLY:
   part above it, so a WAIT quoted in the reply body does nothing.
 - Lines are normalized before matching (markdown `*_#>\`` and a leading `- ` stripped).
 - **Sentinel.** `PROJECT COMPLETE` counts as a standalone line above `REPLY:` (a
-  preamble is tolerated), or as the first non-empty line of the body. Deeper in the
-  body it is ignored, with a warning (C4).
-- **No `REPLY:`.** One nudge in the same session. If the output is still malformed,
-  the whole text is sent as the reply and a warning is logged (C5).
+  preamble is tolerated), or as the first non-empty line of the body. Deeper in the body
+  it is ignored, with a warning (C4).
+- `REPLAN` sends the problem to the planner (6.6). The REPLY is held and the supervisor
+  writes a new one after the planner answers.
+- **No `REPLY:`.** One nudge in the same session. If the output is still malformed, the
+  whole text is sent as the reply and a warning is logged (C5).
 - **Empty output.** One nudge in the same session, then `TransientError`.
 - Durations: `90s`, `30m`, `2h`, `1d`, `1h30m`; a bare number means seconds.
 
-### 4.3 Supervisor reply text
+### 5.3 Planner output grammar
 
-The text of the last step that contains `REPLY:`. If no step does, all text parts are
-joined. That keeps the old "last step" behaviour and survives a VERDICT written in an
-earlier step.
+One of four forms:
 
-### 4.4 Builder report signals
+```
+QUESTIONS:
+1. <question>
+   Recommended: <answer>
+   Why it matters: <what changes with the answer>
+2. …
+```
+
+```
+PLAN:
+SUMMARY: <one paragraph>
+=== FILE docs/PRD.md ===
+<full content>
+=== END FILE ===
+=== FILE CLAUDE.md ===
+…
+=== END FILE ===
+(and docs/DECISIONS.md, docs/OPEN.md, bridge.toml)
+KICKOFF:
+<the builder's first instruction>
+```
+
+```
+CHANGE: <title>
+REASON: <what is wrong or blocked, with evidence and paths>
+MATERIAL: yes | no
+=== EDIT docs/PRD.md ===
+--- FIND ---
+<exact current text; must occur exactly once>
+--- REPLACE ---
+<new text>
+=== END EDIT ===
+LEDGER:
+<context, options, decision and reasons for the ledger entry>
+TO SUPERVISOR:
+<guidance>
+KICKOFF:                              only when answering `decide`
+<the builder's instruction>
+```
+
+```
+NO CHANGE: <reason>
+TO SUPERVISOR:
+<guidance>
+```
+
+Edits are find/replace blocks, not unified diffs:
+- the bridge checks that each FIND matches exactly once, applies the edit, and renders
+  the unified diff itself (`.bridge/plan/changes/PC-NNN.diff`);
+- the diff the owner reviews is therefore exact, whereas model-written diffs often carry
+  wrong hunk headers;
+- a FIND that does not match goes back to the planner once.
+
+### 5.4 Builder report signals
 
 - `WAIT …` lines anywhere in the report are a wait request (the last one wins). The
-  supervisor sees it; it is honoured unless the supervisor writes `NO WAIT` or its own
-  WAIT. The builder knows the pid or reset time; the supervisor keeps the veto.
+  supervisor sees it, and it is honoured unless the supervisor writes `NO WAIT` or its
+  own WAIT. The builder knows the pid or reset time; the supervisor keeps the veto.
 - The `DECISIONS NEEDED:` section is extracted, highlighted to the supervisor, and shown
   in `status`.
-- A phase claim matching `rotation.phase_complete_pattern` (default
-  `(?i)\bphase\s+[\w.-]+\s+(?:is\s+)?complete\b`) marks a phase boundary. The decision
-  is made once per builder report and stored, so retries do not repeat it (C1).
+- A phase claim matching `rotation.phase_complete_pattern` marks a phase boundary. The
+  decision is made once per builder report and stored, so retries do not repeat it
+  (C1).
+- Changes to contract files are detected from git, not from the text (6.8).
 
-## 5. Loop state machine
+### 5.5 Planner and supervisor reply text
+
+The text of the last step that contains the form's marker (`REPLY:`, or `QUESTIONS:`,
+`PLAN:`, `CHANGE:`, `NO CHANGE:`). If no step contains one, all text parts are joined.
+That keeps the old "last step" behaviour and survives a VERDICT written in an earlier
+step.
+
+## 6. The planner
+
+### 6.1 `agent-bridge new "<idea>"`
+
+1. **Repo.**
+   - `--repo PATH`, default the current directory. A missing directory is created and
+     `git init`-ed.
+   - `new` refuses if the contract files already exist. Existing files are adopted with
+     `init` and `approve` (6.4), or changed with `decide` (6.7).
+2. **Engines.** The three roles' engines and models come from `--planner`, `--supervisor`
+   and `--builder` (`ENGINE:MODEL`), or the defaults (section 9). They are recorded in
+   `.bridge/state.json`, so the planner can start before `bridge.toml` exists.
+3. **Interview.**
+   - The planner reads the repo (read-only) and returns one batch of numbered questions,
+     at most 8, each with a recommended answer and what changes with it.
+   - It may ask one follow-up batch, only when an answer leaves a choice it cannot
+     settle conservatively.
+4. **Answers.**
+   - In a terminal, `new` prints the questions and reads the owner's reply inline. "use
+     your recommendations", or an empty reply, takes every recommendation. A partial
+     reply ("2: Postgres; the rest as recommended") is passed on verbatim.
+   - Without a terminal, `new` stops in `INTERVIEW` and prints the questions.
+     `agent-bridge say "<answers>"` delivers them and runs the drafting turn in the
+     foreground.
+   - With `--auto-approve`, the bridge tells the planner, labelled `[bridge]`, that the
+     owner chose `--auto-approve` and it is to use its recommendations.
+5. **Drafting.** The planner returns the five contract files and a kickoff (5.3). The
+   bridge then:
+   - validates them (6.2);
+   - writes them uncommitted, so the owner can read and edit them in place;
+   - adds its block to `CLAUDE.md` (6.3), creates the `AGENTS.md` symlink, and adds
+     `.bridge/` to `.gitignore`;
+   - stops in `PLAN_REVIEW`, with a summary and the next command.
+
+### 6.2 The contract files
+
+| File | Content | The bridge checks |
+|---|---|---|
+| `docs/PRD.md` | goals, non-goals, numbered requirements (R-1…), phases in order; each phase has exit criteria as checkable bullets, and its owner-only items | Goals, Non-goals and Requirements headings; at least one phase; an exit-criteria list under every phase |
+| `CLAUDE.md` | project rules, including the honesty rules: no fabricated numbers, no tuning thresholds to pass, dev runs labelled as such, failures reported as failures | non-empty; the bridge adds its own block (6.3) |
+| `docs/DECISIONS.md` | the decision ledger, seeded with the planner's design choices and the interview answers | entries in the ledger format (6.5) |
+| `docs/OPEN.md` | open questions and OWNER-BLOCKED items known up front | every entry has a status: OPEN, OWNER-BLOCKED or RESOLVED |
+| `bridge.toml` | roles, engines, models, budgets | parses with `tomllib` and validates (section 9); owner-only settings below |
+
+- Any other path is refused. Paths come from `[project]`, so a migrated project keeps
+  `docs/TRADEOFFS.md` as its ledger.
+- A failed check goes back to the planner once, with the errors. A second failure pauses,
+  with the errors in `PAUSED.md`.
+- **Owner-only settings.** `git.push = "allowed"` and `billing.mode = "api-key"` come
+  only from the owner. Under `--auto-approve` the bridge rejects them in the planner's
+  `bridge.toml`; otherwise it lists them for the owner's attention at approval. Engines
+  and models given to `new` as flags are kept as given.
+
+### 6.3 The generated `CLAUDE.md` block
+
+Between `<!-- agent-bridge:begin (generated; edits are overwritten) -->` and
+`<!-- agent-bridge:end -->`, the bridge maintains the rules every project needs,
+whatever its plan:
+- the message labels, and what each origin may instruct;
+- headless: never use a question tool; questions go under `DECISIONS NEEDED:`;
+- the end-of-turn report (`DECISIONS NEEDED:`, `PROCEEDING:`) and the WAIT lines;
+- long jobs run as background processes, with their command, pid and log recorded;
+- the builder never edits the contract files; changes are proposed under
+  `DECISIONS NEEDED:`;
+- commits use the repo's local author, carry no Co-Authored-By or AI attribution, are
+  never force-pushed, and are pushed only if `git.push = "allowed"`;
+- the baseline honesty rules.
+
+The block is versioned. The bridge refreshes it when its version changes and never
+touches text outside the markers. On a migrated project the block is added only by
+`init --write-rules`, after showing the diff.
+
+### 6.4 Approval gate
+
+- `run` refuses to start until a contract is approved. Nothing builds before that.
+- **`agent-bridge approve`** in `PLAN_REVIEW`:
+  1. hashes `PRD.md`, `CLAUDE.md` and `bridge.toml` as they are now, owner edits included;
+  2. records the approval in the state, and appends a ledger entry: "Plan approved by the
+     owner (agent-bridge approve, <time>; PRD sha256 …)";
+  3. changes the Status of the seeded entries from `PROPOSED` to `APPROVED`;
+  4. starts the loop: `--forever` by default, or `--loop N`, `--background`, `--no-run`.
+     The first builder message is the planner's kickoff, which begins with committing the
+     contract files by explicit path.
+- **`--auto-approve`** skips the interview wait and the review. Every planner choice
+  (each seeded ledger entry, and each recommended answer it used) gets the Status
+  `AUTONOMOUS DECISION - owner to review`, and the loop starts.
+- **Adopting an existing contract.** A project that already has a PRD and rules (the
+  three migrated projects) skips the planner. `init` writes `bridge.toml`, and `approve`
+  adopts the current files as the approved contract. The PRD structure checks are
+  warnings there, not errors.
+
+### 6.5 Ledger
+
+```
+## DEC-012 Split phase 3 into 3a and 3b
+- Decided by: planner (re-plan requested by the supervisor at exchange 41)
+- Status: AUTONOMOUS DECISION - owner to review
+- Change: PC-003 (.bridge/plan/changes/PC-003.diff)
+
+Context, options, decision and reasons, written by the decider.
+```
+
+- For every entry it records, the bridge assigns the DEC- and PC- numbers and writes the
+  heading and the "Decided by", "Status" and "Change" lines. The planner writes only the
+  body, so it cannot claim the owner's approval.
+- Status values:
+  - `PROPOSED`
+  - `APPROVED by the owner <date>`
+  - `AUTONOMOUS DECISION - owner to review`
+  - `OWNER DECISION (<source>)`
+  - `APPLIED (non-material)`
+  - `AWAITING OWNER`
+  - `REJECTED by the owner: <reason>`
+  - `SUPERSEDED by DEC-n`
+- The builder records its own in-loop decisions (approved by the supervisor) in the same
+  format, with "Decided by: builder, approved by the supervisor", as the `CLAUDE.md`
+  block requires.
+- `review` lists every `AUTONOMOUS DECISION - owner to review` and `AWAITING OWNER`
+  entry.
+
+### 6.6 Re-planning
+
+- **Trigger.** Only the supervisor, with `REPLAN: <problem>`, when the plan itself is
+  wrong or blocked: a spec conflict, a phase that cannot meet its exit criteria, or a
+  requirement contradicted by real data. It never improvises around the plan. The
+  builder raises such problems under `DECISIONS NEEDED:`; the owner uses `decide`.
+- **Proposal.** The planner investigates (read-only) and answers either:
+  - `CHANGE`: edits, a reason, materiality, the ledger body, and a note for the
+    supervisor; or
+  - `NO CHANGE`: a reason and a note.
+- **Material or not.** The planner classifies, and the bridge can only raise the
+  classification. An edit is material when it touches goals, non-goals, a requirement, a
+  phase's scope or order, an exit criterion, the owner-only items, or any number.
+- **Never loosened without the owner.** A proposal that weakens an exit criterion or a
+  threshold is never applied automatically, even under `--auto-approve`. It is recorded
+  as `AWAITING OWNER`, with an OWNER-BLOCKED item in `OPEN.md`, and the phase can end at
+  the owner-blocked boundary. A low result is a finding, not a reason to move the bar.
+- **Outcomes:**
+
+  | Proposal | `--auto-approve` off | `--auto-approve` on |
+  |---|---|---|
+  | non-material | applied; `APPLIED (non-material)` | the same |
+  | material | not applied; `AWAITING OWNER` and an OWNER-BLOCKED item; the loop continues on the current contract | applied; `AUTONOMOUS DECISION - owner to review` |
+  | weakens a criterion or threshold | `AWAITING OWNER` | `AWAITING OWNER` |
+  | NO CHANGE | the planner's note goes to the supervisor | the same |
+
+- After any outcome, the supervisor gets a turn with the planner's answer (labelled
+  `[planner]`) and the same builder report. It writes its instruction under the contract
+  as it now stands.
+- `agent-bridge approve PC-n` applies a waiting change, at the next step boundary if a
+  loop is running. `--reject PC-n --reason "…"` records `REJECTED by the owner` and tells
+  the planner and the supervisor.
+- `budget.max_replans_per_phase` (default 3) caps re-plans per phase. Past the cap, the
+  problem becomes an OWNER-BLOCKED item.
+
+### 6.7 Owner decisions: `agent-bridge decide DOC`
+
+This is the OWNER_REVIEW.md flow, routed through the planner:
+1. The bridge checks that DOC has D-items (`## D1 …`) and a "Done when" checklist.
+2. The planner reads DOC and the contract. It returns `CHANGE` blocks that put the
+   owner's decisions into the PRD, `OPEN.md` and the ledger (status `OWNER DECISION (D3,
+   docs/OWNER_REVIEW.md)`), plus a kickoff.
+   - Owner decisions need no further approval.
+   - Where a decision is ambiguous or conflicts with the PRD, the planner first asks
+     numbered questions with recommendations, answered as in 6.1.
+3. The bridge applies the edits, starts a fresh supervisor (L15), and sends the planner's
+   kickoff: commit DOC and the plan changes first, work through D1..Dn in order, report
+   hashes and run ids, done when the checklist holds.
+4. It then runs `--forever`, or `--loop N`, `--background` or `--no-run`.
+
+If a loop is already running, `decide` queues DOC, and it is handled at the next step
+boundary.
+
+### 6.8 Contract integrity
+
+- At approval, and after each applied change, the bridge records the sha256 of the PRD,
+  the rules and `bridge.toml`.
+- After every builder turn it compares them. A change made by the builder goes to
+  `review.log`, and to the supervisor as `[bridge] The builder changed docs/PRD.md (diff
+  …). The contract changes only through the planner.` The bridge never reverts anything
+  itself.
+- A running loop never reloads `bridge.toml`. A change shows in `status` and `check`, and
+  applies at the next `run`.
+
+### 6.9 Planner sessions
+
+- The planner keeps one persistent session per project, so it remembers why the plan
+  looks the way it does.
+- It rotates on `planner_max_context_tokens` or `pin --new-planner`. The plan is written
+  down, so a fresh session re-reads the contract and the ledger.
+- Default: Claude Code with `claude-fable-5-1` at `max` effort, the strongest model
+  available to the CLI when this was written.
+
+## 7. Loop state machine
 
 The state lives in `.bridge/state.json`, written atomically (temp file plus rename)
 before each action, so a crash or restart resumes exactly where it stopped.
 
 ```
- IDLE ──(kickoff / say / apply-decisions)──► BUILDER_TURN ◄───────────────────────┐
-                                                  │ builder reply                  │
-                                                  ▼                                │
-                                           SUPERVISOR_TURN                         │
-                                                  │ parsed output                  │
-                 ┌───────────────┬────────────────┼─────────────────┐              │
-                 ▼               ▼                ▼                 ▼              │
-          REPLY, no WAIT        WAIT       PROJECT COMPLETE     ESCALATE           │
-                 │               │                │          (escalate mode)       │
-                 │               ▼                ▼                 ▼              │
-                 │            WAITING          COMPLETE     PAUSED(escalation)     │
-                 │               │ condition met, MAX reached or owner message     │
-                 └───────────────┴─────────────────────────────────────────────────┘
+Planning
+  new ──► INTERVIEW ──answers──► DRAFTING ──► PLAN_REVIEW ──approve──► BUILDER_TURN
+  (INTERVIEW and PLAN_REVIEW wait for the owner; the process exits unless a terminal is attached)
 
- Any turn ── SessionLimit / RateLimited ──► SLEEPING(until reset + 2 min) ──► same turn
- Any turn ── transient error ─────────────► SLEEPING(backoff) ──────────────► same turn
- Any turn ── AuthFailed ──────────────────► PAUSED(auth)
- Any turn ── Unsupported ─────────────────► exit 2 (never loops)
- Any step boundary ── STOP ───────────────► PAUSED(stop), pending message saved
- Any step boundary ── budget cap ─────────► PAUSED(budget), summary written
+Loop
+  BUILDER_TURN ───report───────────────► SUPERVISOR_TURN
+  SUPERVISOR_TURN ──REPLY──────────────► BUILDER_TURN
+                  ──WAIT ──────────────► WAITING ──met / MAX / owner message──► BUILDER_TURN
+                  ──REPLAN─────────────► REPLANNING ──planner answer──► SUPERVISOR_TURN
+                  ──PROJECT COMPLETE───► COMPLETE
+                  ──ESCALATE (escalate mode)──► PAUSED(escalation)
+  decide ──► REPLANNING (owner decisions) ──► BUILDER_TURN (planner kickoff, fresh supervisor)
+  COMPLETE ──say / decide / run --kickoff──► new work, always with a fresh supervisor
+
+Any agent turn
+  SessionLimit / RateLimited ──► SLEEPING (until the reset + 2 min) ──► the same turn
+  transient error ─────────────► SLEEPING (backoff) ─────────────────► the same turn
+  AuthFailed ──────────────────► PAUSED(auth)
+  Unsupported ─────────────────► exit 2 (never loops)
+Any step boundary
+  STOP ────────────────────────► PAUSED(stop), pending message saved
+  budget cap ──────────────────► PAUSED(budget), summary written
 ```
 
 | State | Persisted fields | Leaves when |
 |---|---|---|
-| `IDLE` | — | a kickoff, `say` or `apply-decisions` arrives |
-| `BUILDER_TURN` | pending message parts, attempt, `in_flight` | reply (to `SUPERVISOR_TURN`) or error (table 6.1) |
-| `SUPERVISOR_TURN` | path of the builder report under review, attempt | parsed output |
+| `INTERVIEW` | the questions, the batch number | the owner answers (inline or `say`) |
+| `DRAFTING` | the answers, the attempt | the files validate, or a second failure pauses |
+| `PLAN_REVIEW` | the drafted file hashes | `approve` |
+| `IDLE` | — | a kickoff or `say` arrives |
+| `BUILDER_TURN` | the pending message blocks, attempt, `in_flight` | report (to `SUPERVISOR_TURN`) or an error (8.1) |
+| `SUPERVISOR_TURN` | the path of the report under review, attempt | parsed output |
+| `REPLANNING` | the problem or decisions doc, the source, attempt | the planner's answer is applied (6.6, 6.7) |
 | `WAITING` | WaitSpec, start, deadline, pending reply, who asked | condition met, MAX reached, owner message, STOP |
-| `SLEEPING` | until, reason, resume state | time reached, STOP |
-| `PAUSED` | reason, detail, resume state | `agent-bridge run` again (the process has exited) |
+| `SLEEPING` | until, reason, the state to resume | time reached, STOP |
+| `PAUSED` | reason, detail, the state to resume | `agent-bridge run` again (the process has exited) |
 | `COMPLETE` | time, summary file | new owner work, which always gets a fresh supervisor (L15) |
 
-**PAUSED means the process exits** (code 3) after writing `.bridge/PAUSED.md`: the
-reason, counters, last verdict, open DECISIONS NEEDED, where the pending message is,
-and the exact command to continue. Nothing runs while paused. `agent-bridge run`
-resumes from the saved state.
+**PAUSED means the process exits** with code 3, after writing `.bridge/PAUSED.md`:
+- the reason and the counters;
+- the last verdict and the open DECISIONS NEEDED;
+- where the pending message is;
+- the exact command to continue.
 
-**Crash recovery.** A state saved with `in_flight` set means the bridge died mid-turn.
-On restart the session is checked; if it is busy, it is aborted, and the message is
-resent with "the bridge restarted while you were working; check git status before
-continuing".
+Nothing runs while paused, and `agent-bridge run` resumes from the saved state.
 
-### 5.1 WAIT
+**Crash recovery.** A state saved with `in_flight` set means the bridge died mid-turn. On
+restart the session is checked; if busy, it is aborted, and the message is resent with
+"the bridge restarted while you were working; check git status before continuing".
+
+### 7.1 WAIT
 
 - **Who.** The supervisor, as a directive. The builder, as a request in its report,
   honoured unless the supervisor writes `NO WAIT` or its own WAIT.
-- **Conditions, checked every 15 s with no model calls:**
+- **Conditions,** checked every 15 s with no model calls:
 
   | Form | Satisfied when | Notes |
   |---|---|---|
   | `WAIT UNTIL <time>` | the time is reached | a time with no offset is local; a time in the past is satisfied at once |
-  | `WAIT FOR PID <n>` | the process is gone | the start time (`ps -o lstart=`) is recorded, so a reused pid counts as gone; a pid that is not running at the start is satisfied at once |
+  | `WAIT FOR PID <n>` | the process is gone | the start time (`ps -o lstart=`) is recorded, so a reused pid counts as gone; a pid not running at the start is satisfied at once |
   | `WAIT FOR FILE <path>` | the path exists | a relative path is resolved against the repo |
 
-- **Bounds.** `MAX` defaults to `waits.max` (24 h). Longer requests are clamped and the
-  clamp is logged. A multi-day wait (for example a weekly quota) therefore costs at most
-  one exchange per day.
+- **Bounds.** `MAX` defaults to `waits.max` (24 h). Longer requests are clamped, and the
+  clamp is logged. A multi-day wait, for a weekly quota say, therefore costs at most one
+  exchange a day.
 - **Wake-up.** The next builder message gets `[bridge] The wait (WAIT FOR PID 64410) is
   over: the process exited at 03:31. Check the result before anything else.` (or "MAX
   reached without the condition"), followed by the supervisor's REPLY from the turn that
   set the wait. There is no extra supervisor call.
-- **Interruptions.** STOP ends a wait at once and saves the pending reply. An owner
-  `say` ends it and is delivered with a note that the condition was not met.
-- **Backstop for supervisors that do not use WAIT (L1).** After 3 consecutive
-  exchanges with no repo change and no active wait, the supervisor gets a `[bridge]`
-  note: "if the builder is waiting, use WAIT instead of acknowledging". After 5, the
-  bridge itself sleeps (30 min doubling to 2 h, X's backstop) and logs it. After
-  `budget.max_unchanged_exchanges` (default 12), the run pauses.
+- **Interruptions.** STOP ends a wait at once and saves the pending reply. An owner `say`
+  ends it, and is delivered with a note that the condition was not met.
+- **Backstop for supervisors that do not use WAIT (L1):**
+  - after 3 consecutive exchanges with no repo change and no active wait, the supervisor
+    gets a `[bridge]` note: if the builder is waiting, use WAIT instead of acknowledging;
+  - after 5, the bridge itself sleeps (30 min doubling to 2 h, X's backstop) and logs it;
+  - after `budget.max_unchanged_exchanges` (default 12), the run pauses.
 
-### 5.2 Usage limits
+### 7.2 Usage limits
 
 - A `SessionLimit` with a known reset sleeps until the reset plus 2 minutes, with no
-  model calls, and then retries the same turn. If a builder turn was cut off, the
-  resend says so: "you were cut off by a usage limit at 05:01; check git status and the
-  log, then continue".
+  model calls, then retries the same turn.
+- If a builder turn was cut off, the resend says so: "you were cut off by a usage limit
+  at 05:01; check git status and the log, then continue".
 - An unknown reset backs off 15 min, doubling to 1 h, one request per attempt.
 - 48 hours of consecutive limit sleeping pauses the run.
-- Sleeps are visible in `status` ("sleeping until 17:30, session limit,
-  claude-code/builder").
+- Sleeps show in `status` ("sleeping until 17:30, session limit, claude-code/builder").
 
-### 5.3 Rotation (L19, L15)
+### 7.3 Rotation (L19, L15)
 
-- **Builder.** When the last request's context reaches
-  `rotation.builder_max_context_tokens` (default 600k), when the supervisor writes
-  `ROTATE BUILDER`, or at a phase boundary if `builder_on_phase_complete` is set, the
-  next builder message opens a new session. The supervisor is told one turn ahead, so
-  it can make its REPLY self-contained. The new session gets a `[bridge]` handoff that
-  lists, from config, the rules files, the spec and the phases section, the worklog
-  (from its end back to the current phase), the open-items doc and the owner decisions
-  doc, plus `git log --oneline -20`, `git status` and any background jobs the worklog
-  records. The old session is retired in `sessions.json`, never deleted.
-- **Supervisor.** Rotated at a phase boundary (on by default, as in all three copies),
-  at `supervisor_max_context_tokens`, on `--new-supervisor`, and always before new work
-  after `COMPLETE`. A fresh supervisor's first message includes the last verdict and
-  "a previous supervisor session reviewed exchanges 1–N; re-verify from the repo".
+- **Builder.** A new session opens with the next builder message when any of these
+  happens:
+  - the last request's context reaches `rotation.builder_max_context_tokens` (default
+    600k);
+  - the supervisor writes `ROTATE BUILDER`;
+  - a phase boundary is reached and `builder_on_phase_complete` is set.
+
+  The supervisor is told one turn ahead, so it can make its REPLY self-contained. The new
+  session gets a `[bridge]` handoff listing, from config:
+  - the rules and the PRD;
+  - the worklog, read from its end back to the current phase;
+  - `OPEN.md` and the ledger;
+  - `git log --oneline -20`, `git status`, and any background jobs the worklog records.
+
+  The old session is retired in `sessions.json`, never deleted.
+- **Supervisor.** Rotated at a phase boundary (on by default, as in all three copies), at
+  `supervisor_max_context_tokens`, on `--new-supervisor`, and always before new work
+  after `COMPLETE`. A fresh supervisor's first message includes the last verdict and "a
+  previous supervisor session reviewed exchanges 1–N; re-verify from the repo".
+- **Planner.** 6.9.
 - A timeout never rotates a session (L3).
 
-## 6. Errors, safety and prompts
+## 8. Errors, safety and prompts
 
-### 6.1 Error handling
+### 8.1 Errors
 
-| Error | Builder turn | Supervisor turn |
+| Error | Builder turn | Planner or supervisor turn |
 |---|---|---|
 | `Timeout` | aborted server-side; resent with a resume note; 3 in a row pauses (L14) | aborted; retried in the same session after backoff; 3 in a row pauses |
-| `QuestionAsked` | rejected and aborted; resent with the questions and "answer them under DECISIONS NEEDED"; 3 in a row pauses | the same, with a note |
-| `SessionLimit`, `RateLimited` with a reset | sleep until the reset (5.2) | the same |
+| `QuestionAsked` | rejected and aborted; resent listing the questions and "answer them under DECISIONS NEEDED"; 3 in a row pauses | the same, with a note |
+| `SessionLimit`, or `RateLimited` with a reset | sleep until the reset (7.2) | the same |
 | `RateLimited`, no reset | backoff 60 s doubling to 30 min | the same |
 | `AuthFailed` | pause: "Run `claude login` (or re-enroll the pool account), then `agent-bridge run`" (L18) | the same |
 | `Unsupported` | exit 2 with the fix | the same |
@@ -415,137 +741,163 @@ continuing".
 | Empty reply | `TransientError` | one in-session nudge, then `TransientError` |
 
 Every retry, sleep and pause is an event in `events.jsonl` and a line on the console.
-Pauses and anything the owner should review also go to `review.log`.
+Pauses, and anything the owner should review, also go to `review.log`.
 
-### 6.2 Safety
+### 8.2 Safety
 
-- **One bridge per project.** A `fcntl.flock` on `.bridge/lock`, recording pid, start
-  time and argv. It is released by the OS if the process dies (C2).
-- **STOP.** `agent-bridge stop` writes `.bridge/STOP`. It is checked at every step
-  boundary and every 5 s during sleeps and waits; the running turn finishes, and the
-  pending message is saved to `unsent_reply.md` on every path (L13). `stop --now` also
-  aborts the running turn and saves the message with a resume note. A new `run` clears
-  STOP only after taking the lock.
-- **Read-only, reported per role.** `check`, `status` and the start banner print it,
-  for example "supervisor: claude-code, read-only enforced (--tools Read,Grep,Glob)" or
-  "supervisor: opencode, read-only by instruction; tripwire: repo delta and tool-call
-  audit". The tripwire logs which paths changed during the turn, not just "something
-  changed" (L10).
+- **One bridge per project.** An `fcntl.flock` on `.bridge/lock` records pid, start time
+  and argv. The OS releases it if the process dies (C2).
+- **STOP.**
+  - `agent-bridge stop` writes `.bridge/STOP`, which is checked at every step boundary
+    and every 5 s during sleeps and waits.
+  - The running turn finishes, and the pending message is saved to `unsent_reply.md` on
+    every path (L13).
+  - `stop --now` also aborts the running turn, and saves the message with a resume note.
+  - A new `run` clears STOP only after taking the lock.
+- **Read-only, reported per role** (section 2). The tripwire logs which paths changed
+  during a planner or supervisor turn, not just that something changed (L10).
+- **Contract integrity** (6.8).
 - **Tool-call audit, from events.** The builder's shell commands are matched against
-  danger patterns (force push, `push` when `git.push: never`, `reset --hard`,
-  `rm -rf` outside the repo, `DROP TABLE`, plus `safety.danger_commands`), and hits go
-  to `review.log` with the exact command. Prose is not matched (L9).
-- **Git.** The bridge never commits, configures git or pushes. After each builder turn
-  it lists new commits and flags any whose message carries `Co-Authored-By` or AI
-  attribution, or whose author differs from the repo's local `user.email`. It flags
-  remote-tracking refs that moved when `git.push: never`. The rules template forbids
-  co-author lines and force-push.
+  danger patterns, and hits go to `review.log` with the exact command. Prose is not
+  matched (L9). The patterns: force push; `push` when `git.push = "never"`; `reset
+  --hard`; `rm -rf` outside the repo; `DROP TABLE`; plus `safety.danger_commands`.
+- **Git checks** after each builder turn:
+  - new commits whose message carries `Co-Authored-By` or AI attribution are flagged;
+  - so are commits whose author differs from the repo's local `user.email`;
+  - so are remote-tracking refs that moved while `git.push = "never"`.
 - **Sessions bound to the repo.** `pin` and startup check that an opencode session's
-  directory (read-only DB lookup) or a claude session file's cwd is this repo or the
+  directory (a read-only DB lookup), or a claude session file's cwd, is this repo or the
   role's neutral directory (L17). There is no `--continue` fallback (C3).
-- **Environment.** `ANTHROPIC_API_KEY` is stripped for every child unless
-  `billing: api-key`. `project.env_file` (opt-in) loads variables into the builder's
-  environment only. For an opencode builder that means the server's environment, so
-  the server must be restarted for changes to apply; `status` warns when the file has
-  changed since the server started.
-- **caffeinate.** On macOS, `run` starts `caffeinate -is -w <own pid>`, which exits
-  with the bridge.
+- **Environment.**
+  - `ANTHROPIC_API_KEY` is stripped for every child unless `billing.mode = "api-key"`.
+  - `project.env_file` (opt-in) loads variables into the builder's environment only.
+    For an opencode builder that means the server's environment, so the server must be
+    restarted for a change to apply; `status` warns when the file has changed since the
+    server started.
+- **caffeinate.** On macOS, `run` starts `caffeinate -is -w <own pid>`, which exits with
+  the bridge.
 
-### 6.3 Prompts
+### 8.3 Prompts
 
-- Generic text is built in: the shared parts of the three copies' `SYSTEM` and
-  `AUTONOMOUS`, the read-only and absolute-path rules, re-verify, the output grammar,
-  the autonomous rules and the completion rule.
-- Project text comes from config and repo docs:
-  - `project.supervisor_rules` (for example `docs/SUPERVISOR.md`, the project
-    principles F, X and N hard-coded), inlined into the supervisor's first message;
-  - `owner_only` (the work only the owner may do);
-  - `project.phases` (where the phase plan lives, for example "PRD section 14");
-  - the doc paths.
+- **Generic text is built in:**
+  - the shared parts of the three copies' `SYSTEM` and `AUTONOMOUS`;
+  - the read-only and absolute-path rules, and re-verify;
+  - the output grammars, the autonomous rules, and the completion rule.
+- **The supervisor holds the builder to the contract and never invents scope.** Every
+  instruction traces to the PRD (it cites the requirement or the phase's exit criteria).
+  Work outside the PRD is refused, and a gap in the plan is a `REPLAN`, not an
+  improvisation.
+- **Completion** is reached when every phase's exit criteria are met, or the phase is
+  blocked only on OWNER-BLOCKED items or plan changes awaiting the owner, and the
+  supervisor has checked this in the repo.
+- **Project text comes from the contract files.** For a migrated project it also comes
+  from `project.supervisor_rules` (for example `docs/SUPERVISOR.md`, holding the project
+  principles F, X and N hard-coded), inlined into the supervisor's first message.
 - **Repeat detection** no longer injects task text into the builder. It feeds the idle
-  backstop in 5.1, and its notes go to the supervisor, labelled `[bridge]` (L12).
-- **Templates.** `init` and `new` write a "Running under agent-bridge" block for
-  `CLAUDE.md`: headless (no question tools), WAIT lines, the report format, the commit
-  rules, and long jobs run as background processes with their pid and log recorded in
-  the worklog.
+  backstop (7.1), and its notes go to the supervisor, labelled `[bridge]` (L12).
 
-## 7. Configuration: `bridge.yaml`
+## 9. Configuration: `bridge.toml`
 
-Looked up in the repo root, or passed with `--config PATH`. Unknown keys are errors,
-so a typo cannot silently fall back to a default. Durations accept `30m`, `3h`, `1d`
-or seconds. Paths are relative to the repo and stored absolute.
+- Read with `tomllib`.
+- Looked up in the repo root, or passed with `--config PATH`.
+- Unknown keys are errors, so a typo cannot silently fall back to a default.
+- TOML has no null: optional keys are omitted, and the template shows them commented
+  out.
+- Durations are strings (`"30m"`, `"3h"`, `"1d"`). Paths are relative to the repo and
+  stored absolute.
+- `init` writes this file from a text template; in `new`, the planner writes it. The
+  values below are the defaults.
 
-```yaml
-version: 1
-project:
-  name: FillingQA
-  repo: .                          # relative to this file
-  spec: docs/PRD.md
-  phases: "PRD section 14"         # where the spec's phase plan is
-  rules: [CLAUDE.md]               # the builder's working agreement
-  supervisor_rules: docs/SUPERVISOR.md   # optional project principles for the supervisor
-  decisions_doc: docs/TRADEOFFS.md       # AUTONOMOUS DECISION entries
-  open_items_doc: docs/OPEN.md           # OWNER-BLOCKED items
-  worklog: docs/WORKLOG.md               # optional; used for handoffs
-  env_file: null                   # opt-in, e.g. .env (builder only)
-mode: autonomous                   # autonomous | escalate
-owner_only:                        # work the builder must never do
-  - hand-written eval items (unanswerable, adversarial, natural phrasing)
-builder:
-  backend: opencode                # opencode | claude-code
-  model: anthropic/claude-opus-5-5 # a bare model id gets "anthropic/" for opencode
-  variant: null                    # opencode --variant; claude --effort
-  read_only: false
-  timeout: 3h
-supervisor:
-  backend: claude-code
-  model: claude-fable-5-1
-  variant: xhigh
-  read_only: true
-  timeout: 30m
-opencode:
-  port: 4096                       # one per project
-  accept: "1.18"
-billing: subscription              # subscription | api-key
-git:
-  push: never                      # never | allowed
-waits:
-  max: 24h
-budget:                            # all optional; reaching one pauses with a summary
-  max_exchanges: null              # per `run` invocation
-  max_wall_time: null              # per invocation, waits included
-  max_unchanged_exchanges: 12      # consecutive, outside waits
-rotation:
-  builder_max_context_tokens: 600000
-  builder_on_phase_complete: false
-  supervisor_max_context_tokens: 400000
-  supervisor_on_phase_complete: true
-safety:
-  danger_commands: []              # extra regexes over builder shell commands
-  caffeinate: true
+```toml
+version = 1
+
+[project]
+name = "FillingQA"
+repo = "."                               # relative to this file
+prd = "docs/PRD.md"
+rules = ["CLAUDE.md"]                    # AGENTS.md is a symlink to CLAUDE.md
+decisions = "docs/DECISIONS.md"          # the ledger
+open_items = "docs/OPEN.md"
+mode = "autonomous"                      # autonomous | escalate
+# worklog = "docs/WORKLOG.md"            # used in builder handoffs when present
+# phases = "PRD section 14"              # where the phase plan is, if not under "Phase" headings
+# supervisor_rules = "docs/SUPERVISOR.md"   # extra supervisor principles (migrated projects)
+# env_file = ".env"                      # opt-in; builder environment only
+
+[planner]
+engine = "claude-code"                   # claude-code | opencode
+model = "claude-fable-5-1"
+variant = "max"                          # claude --effort; opencode --variant
+timeout = "1h"
+
+[supervisor]
+engine = "claude-code"
+model = "claude-fable-5-1"
+variant = "xhigh"
+timeout = "30m"
+
+[builder]
+engine = "opencode"
+model = "anthropic/claude-opus-5-5"      # a bare model id gets "anthropic/" on opencode
+timeout = "3h"
+
+[opencode]
+port = 4096                              # one server per project
+accept = "1.18"
+
+[billing]
+mode = "subscription"                    # subscription | api-key   (owner-only)
+
+[git]
+push = "never"                           # never | allowed          (owner-only)
+
+[waits]
+max = "24h"
+
+[budget]                                 # reaching a cap pauses with a summary
+# max_exchanges = 300                    # per run invocation
+# max_wall_time = "72h"                  # per run invocation, waits included
+max_unchanged_exchanges = 12             # consecutive, outside waits
+max_replans_per_phase = 3
+
+[rotation]
+builder_max_context_tokens = 600_000
+builder_on_phase_complete = false
+supervisor_max_context_tokens = 400_000
+supervisor_on_phase_complete = true
+planner_max_context_tokens = 400_000
+phase_complete_pattern = '(?i)\bphase\s+[\w.-]+\s+(?:is\s+)?complete\b'
+
+[safety]
+danger_commands = []                     # extra regexes over builder shell commands
+caffeinate = true                        # macOS
 ```
 
-Fixed internal constants (documented, not configurable): reply cap 24,000 chars,
-backoff 60 s to 30 min, 3 timeouts or 3 questions or 10 errors in a row pause, a 15 s
-poll interval, a 2-minute reset margin.
+Fixed internal constants (documented, not configurable):
+- reply cap 24,000 chars;
+- backoff 60 s to 30 min;
+- a pause after 3 timeouts, 3 questions or 10 errors in a row;
+- a 15 s poll interval;
+- a 2-minute reset margin.
 
-## 8. State directory: `.bridge/`
+## 10. State directory: `.bridge/`
 
 Compatible with the old layout, so migration keeps the logs.
 
 | File | Content |
 |---|---|
-| `state.json` | the machine state (section 5); `schema: 1` |
+| `state.json` | the machine state (section 7), the approved contract hashes; `schema: 1` |
 | `lock` | flock plus pid, start time, argv |
-| `events.jsonl` | structured events: the source for `status` and `logs -f` |
-| `loop.log` | human transcript, in the old `EXCHANGE n` format, appended |
+| `events.jsonl` | structured events with origin and recipient; the source for `status` and `logs -f` |
+| `loop.log` | human transcript: every message as delivered, labels included; appended |
 | `review.log` | owner-facing warnings, in the old `=== … ===` format, appended |
 | `console.log` | everything printed, appended, with a launch marker per run (L16) |
 | `serve.log` | the opencode server's output, appended |
-| `sessions.json` | every session the bridge created or adopted: role, backend, id, title, directory, created, retired |
-| `turns/NNNN-builder.jsonl`, `turns/NNNN-supervisor.jsonl` | raw event streams; the 200 most recent kept |
+| `sessions.json` | every session the bridge created or adopted: role, engine, id, title, directory, created, retired |
+| `plan/` | interview questions and answers, the drafts as returned, `changes/PC-NNN.json` and `.diff` |
+| `turns/NNNN-<role>.jsonl` | raw event streams; the 200 most recent kept |
 | `builder_last.md` | the last builder report (kept for compatibility) |
-| `inbox/` | owner messages from `say`, not yet delivered |
+| `inbox/` | owner messages, approvals and decisions docs not yet delivered |
 | `STOP`, `STOP_NOW` | stop requests |
 | `unsent_reply.md` | the pending message saved on stop |
 | `PAUSED.md` | the pause summary |
@@ -553,31 +905,44 @@ Compatible with the old layout, so migration keeps the logs.
 
 `init` and `new` add `.bridge/` to `.gitignore`.
 
-## 9. CLI
+## 11. CLI
 
 Every command takes `--repo PATH` (default: the cwd's git root) and `--config PATH`.
 
 | Command | What it does |
 |---|---|
-| `init` | Write a commented `bridge.yaml` (detecting existing docs, picking a free opencode port), add `.bridge/` to `.gitignore`, suggest the `AGENTS.md` symlink. Never overwrites. |
-| `new "build X" [--auto-approve]` | Create or use the repo; write `bridge.yaml`. A supervisor drafting turn returns the brief (spec with phases, exit criteria and owner-only work), `CLAUDE.md`, `docs/SUPERVISOR.md` and doc skeletons as FILE blocks, which the **bridge** writes, so the supervisor stays read-only. Shows them for approval (approve, revise with feedback, quit) unless `--auto-approve`; without a TTY it stops after drafting. Then it kicks off and runs `--forever`. |
-| `run [--forever \| --loop N] [--kickoff MSG\|@file] [--new-supervisor] [--new-builder] [--approve] [--background]` | Run the loop. With neither `--forever` nor `--loop`, one exchange. `--approve` shows each supervisor reply for send / edit / discard (the old manual mode). `--background` detaches, writes to `console.log` and prints the pid. |
-| `status [--json]` | Running, sleeping, waiting or paused (with the reason); current exchange and turn age; last verdict; active wait or sleep and when it ends; sessions with context size; read-only kind per role; warnings since launch; budget use; pending owner messages; open DECISIONS NEEDED. |
-| `stop [--now]` | Section 6.2. |
-| `pin --builder ID \| --supervisor ID \| --new-builder \| --new-supervisor` | Adopt or reset a session. It checks the session belongs to this repo and refuses while a bridge is running. |
-| `say "message" \| @file [--to both\|builder\|supervisor]` | Queue an owner message for the next exchange (it interrupts a wait). By default both agents get it verbatim, labelled as the owner's. |
-| `review [--template PATH]` | Build the owner to-do from the decisions doc (AUTONOMOUS DECISION headings, skipping ones with an owner-review line) and the open-items doc (OWNER-BLOCKED headings, table rows and status lines, skipping RESOLVED). It handles all three projects' formats. Writes `.bridge/owner_todo.md` and prints it. `--template` writes an `OWNER_REVIEW.md` skeleton: D1..Dn and a "Done when" checklist. |
-| `apply-decisions DOC [--loop N]` | Check that DOC has D-items and a "Done when" list, start a fresh supervisor, send the owner kickoff (adapted from FillingQA's `owner_review_kickoff.md`: commit DOC first, work D1..Dn in order, report hashes and run ids, done when the checklist holds), and run `--forever`. |
+| `new "<idea>" [--repo PATH] [--auto-approve] [--planner E:M] [--supervisor E:M] [--builder E:M]` | The planner flow (6.1). |
+| `approve [PC-n …] [--reject PC-n --reason TEXT] [--forever \| --loop N \| --background \| --no-run]` | Approve the plan in `PLAN_REVIEW`, adopt an existing contract, or approve or reject waiting plan changes (6.4, 6.6). |
+| `decide DOC [--auto-approve] [--forever \| --loop N \| --background \| --no-run]` | Owner decisions through the planner (6.7). |
+| `init [--write-rules]` | For an existing repo: write `bridge.toml` from the text template (detecting existing docs and picking a free opencode port), add `.bridge/` to `.gitignore`, and suggest the `AGENTS.md` symlink. `--write-rules` adds the generated block to `CLAUDE.md` after showing the diff. Never overwrites. |
+| `run [--forever \| --loop N] [--kickoff MSG\|@file] [--new-supervisor] [--new-builder] [--confirm-each] [--background]` | Run the loop on the approved contract. With neither `--forever` nor `--loop`, one exchange. `--kickoff` is an owner message. `--confirm-each` shows each supervisor reply for send, edit or discard (the old manual mode). `--background` detaches, writes to `console.log`, and prints the pid. |
+| `status [--json]` | See below. |
+| `stop [--now]` | 8.2. |
+| `pin --planner ID \| --supervisor ID \| --builder ID \| --new-planner \| --new-supervisor \| --new-builder` | Adopt or reset a session. It checks that the session belongs to this repo, and refuses while a bridge is running. |
+| `say "message" \| @file [--to both\|builder\|supervisor]` | In `INTERVIEW`: the answers to the planner, which runs the drafting turn. Otherwise: an owner message for the next exchange, which interrupts a wait; by default both agents get it verbatim. |
+| `review [--template PATH]` | The owner to-do: `AUTONOMOUS DECISION` and `AWAITING OWNER` ledger entries, OWNER-BLOCKED items (headings, table rows and status lines; RESOLVED skipped; all three projects' formats), and waiting plan changes. Writes `.bridge/owner_todo.md` and prints it. `--template` writes an `OWNER_REVIEW.md` skeleton (D1..Dn and "Done when"). |
 | `logs [-f] [--transcript \| --review \| --console \| --serve \| --events] [-n N]` | Default: rendered events. `-f` follows. |
-| `check` | Config, binaries and versions, `autoupdate`, auth (`claude auth status`), server port, read-only kind per role, git identity, `.gitignore`, `AGENTS.md`, presence of the configured docs. No model calls. |
+| `check` | Config; binaries and versions; `autoupdate`; auth (`claude auth status`); the server port; read-only per role; git identity; `.gitignore`; `AGENTS.md`; contract hashes and drift; the configured docs. No model calls. |
 
-Exit codes: 0 complete or stopped; 2 configuration or unsupported; 3 paused; 130
-interrupted.
+`status [--json]` shows:
+- the state: planning, running, sleeping, waiting or paused, with the reason;
+- the current exchange and the turn's age;
+- the last verdict;
+- an active wait or sleep, and when it ends;
+- the sessions, with context size;
+- read-only enforcement per role;
+- the contract (approved at, drift);
+- waiting plan changes and pending owner messages;
+- warnings since launch, and budget use;
+- open DECISIONS NEEDED.
 
-## 10. Live view
+Exit codes: 0 complete or stopped; 2 configuration or unsupported; 3 paused or waiting
+for the owner; 130 interrupted.
 
-The foreground `run` and `logs -f` share one renderer over `events.jsonl`, in plain
-ASCII:
+## 12. Live view
+
+The foreground `run` and `logs -f` share one renderer over `events.jsonl`, in plain ASCII.
+Every line names the role it came from:
 
 ```
 [22:20:29] == exchange 3 == builder (opencode anthropic/claude-opus-5-5, ses_f08e8379)
@@ -587,91 +952,131 @@ ASCII:
 [22:31:02]   builder + done in 10m33s, ctx 120,541 tokens, 2 new commits
 [22:31:03]   supervisor (claude-code claude-fable-5-1, read-only enforced)
 [22:31:20]   supervisor > Read ~/FillingQA/docs/WORKLOG.md
-[22:32:40]   VERDICT: Builder committed F-144 (65c442f) ... Sound.
-[22:32:40]   WAIT FOR PID 64410 (max 24h): sleeping, no model calls
+[22:32:40]   supervisor VERDICT: Builder committed F-144 (65c442f) ... Sound.
+[22:32:40]   bridge   WAIT FOR PID 64410 (max 24h): sleeping, no model calls
 ```
 
 Text lines are clipped in the live view; the full text is in `loop.log` and the turn
-files. For opencode, the start banner also prints the `opencode attach` command, for
-watching the builder inside opencode itself.
+files. For an opencode role, the start banner also prints the `opencode attach` command,
+for watching inside opencode itself.
 
-## 11. Budget
+## 13. Budget
 
-Checked at every step boundary. When a cap is reached (exchanges or wall time for this
-invocation, or the unchanged streak outside waits), the run pauses: `PAUSED.md`
-records which cap, the counters, the last verdict, the open decisions and the command
-to continue. It never continues silently.
+Checked at every step boundary. The caps:
+- exchanges, or wall time, for this invocation;
+- the unchanged streak, outside waits;
+- re-plans per phase.
 
-## 12. Testing
+When one is reached, the run pauses. `PAUSED.md` records which cap, the counters, the
+last verdict, the open decisions, and the command to continue. It never continues
+silently.
 
-- pytest; every test gets a temporary repo (`git init` in `tmp_path`) and a temporary
-  `.bridge/` (L8). No test makes a model call or reads the real `~/.local/share/opencode`.
+## 14. Testing
+
+- pytest. Every test gets a temporary repo (`git init` in `tmp_path`) and a temporary
+  `.bridge/` (L8). No test makes a model call or reads the real
+  `~/.local/share/opencode`.
 - A fake clock replaces sleeping, so waits, limits and backoff run instantly.
-- **Unit:** the output grammar (every directive, sentinel placements, the no-REPLY
-  fallback); reset parsing (every format quoted in INVENTORY L2); wait conditions,
-  including pid reuse; config validation; message composition and labels; `review`
-  extraction over fixtures in all three projects' formats.
-- **Engine with FakeBackend:** kickoff to completion; STOP saving the pending message on
-  every path; WAIT for each form, wake notes and interruptions; limit sleep and resend;
-  auth pause and exit code; `Unsupported` exits without retrying; timeout and question
-  bounds; budget pause and summary; rotation, decided once (C1); a fresh supervisor
-  after COMPLETE; an owner `say` reaching both agents once; crash recovery from
-  `in_flight`; a second instance refused by the lock.
-- **Backend plumbing:** command lines for each role and backend; event parsing from
+- **Unit tests:**
+  - all three output grammars: every directive and form, sentinel placements, the
+    no-REPLY fallback;
+  - reset parsing, for every format quoted in INVENTORY L2;
+  - wait conditions, including pid reuse;
+  - config validation, including the owner-only settings;
+  - message composition and labels;
+  - find/replace edits and diff rendering;
+  - materiality rules;
+  - `review` extraction over fixtures in all three projects' formats.
+- **Planner with FakeBackend:**
+  - interview answered inline, with `say`, and under `--auto-approve`;
+  - drafting validation with one retry, then a pause;
+  - `approve` hashing and status changes;
+  - adopting an existing contract;
+  - every cell of the re-planning outcome table;
+  - a threshold edit never applied automatically;
+  - `max_replans_per_phase`;
+  - `decide`, with a fresh supervisor;
+  - contract drift flagged and not reverted.
+- **Engine with FakeBackend:**
+  - kickoff to completion;
+  - STOP saving the pending message on every path;
+  - WAIT for each form, with its wake notes and interruptions;
+  - limit sleep and resend;
+  - the auth pause and its exit code;
+  - `Unsupported` exiting without retrying;
+  - the timeout and question bounds;
+  - the budget pause and summary;
+  - rotation decided once (C1);
+  - a fresh supervisor after COMPLETE;
+  - an owner `say` reaching each agent once;
+  - crash recovery from `in_flight`;
+  - a second instance refused by the lock;
+  - origin labels in `loop.log` and `events.jsonl`.
+- **Backend plumbing:** command lines for each role and engine; event parsing from
   recorded fixtures; timeout leading to abort; question polling, reject and abort; the
-  retry status leading to `SessionLimit` (fake `opencode` and `claude` executables, and
-  a fake HTTP server). The fixtures are recorded during the live smoke tests and
-  scrubbed of personal data.
+  retry status leading to `SessionLimit`. These use fake `opencode` and `claude`
+  executables and a fake HTTP server. The fixtures are recorded during the live smoke
+  tests and scrubbed of personal data.
 
-## 13. Dependencies
+## 15. Dependencies and packaging
 
-- Runtime: **PyYAML**. `bridge.yaml` is YAML by requirement, the standard library has no
-  YAML parser, and a hand-written subset parser for the file that controls unattended
-  runs is a correctness risk. `yaml.safe_load` only.
-- Development: **pytest**.
-- Everything else is stdlib: `subprocess`, `threading`, `urllib`, `sqlite3`,
-  `zoneinfo`, `fcntl`, `argparse`, `json`.
-- Packaged with `pyproject.toml` (setuptools), `requires-python >= 3.12`, console
-  script `agent-bridge`. Installed with
-  `uv tool install --editable ~/agent-bridge`, or with `pip` under
+- **Runtime: none.** `bridge.toml` is read with `tomllib` (Python 3.12). Everything else
+  is stdlib: `subprocess`, `threading`, `urllib`, `sqlite3`, `zoneinfo`, `fcntl`,
+  `argparse`, `json`, `difflib`, `hashlib`.
+- **Development:** pytest.
+- **Packaging:** `pyproject.toml` with the setuptools build backend (a build-time tool,
+  not a runtime dependency), `requires-python >= 3.12`, and the console script
+  `agent-bridge`.
+- **Install:** `uv tool install --editable ~/agent-bridge`, or `pip` under
   `/opt/homebrew/bin/python3.12`. The `python3` on PATH is 3.9.
 
-## 14. Migration plan (detail goes in `docs/MIGRATION.md`; not performed)
+## 16. Migration plan (detail in `docs/MIGRATION.md`; not performed)
 
 Per project, while its bridge is stopped:
 
-1. **Config.** Write `bridge.yaml`: same port (4096, 4097, 4098), same models, builder
-   on opencode. The supervisor stays on opencode at first (the current behaviour, and
-   it keeps the supervisor session) or moves to claude-code for enforced read-only
-   (this starts a fresh supervisor).
-2. **Prompts.** Move the project parts of `SYSTEM` and `AUTONOMOUS` verbatim into
-   `docs/SUPERVISOR.md` and `owner_only:`. Keep the repo's `CLAUDE.md` and add the
-   agent-bridge block.
-3. **State.** `agent-bridge pin --builder $(cat .bridge/session)`, and `--supervisor`
-   the same way. Keep `loop.log`, `review.log`, `console.log` and `serve.log`; the
-   bridge appends. `unsent_reply.md` and `builder_last.md` become the pending state.
-   Leave the kickoff files where they are.
-4. **Environment.** X's `.env` becomes `project.env_file: .env`. N's question polling
+1. **Config.** Write `bridge.toml`:
+   - the same port (4096, 4097, 4098) and models, with the builder on opencode;
+   - `decisions = "docs/TRADEOFFS.md"`;
+   - the supervisor either stays on opencode at first (current behaviour, keeping its
+     session) or moves to Claude Code for enforced read-only (a fresh supervisor);
+   - a planner configured for later re-plans and `decide`.
+2. **Contract.** `agent-bridge approve` adopts the existing `docs/PRD.md` and `CLAUDE.md`
+   as the approved contract. Move the project parts of `SYSTEM` and `AUTONOMOUS`
+   verbatim into `docs/SUPERVISOR.md`. `init --write-rules` adds the generated block to
+   `CLAUDE.md` after showing the diff.
+3. **State.** `agent-bridge pin --builder $(cat .bridge/session)`, and the same for
+   `--supervisor`. Keep `loop.log`, `review.log`, `console.log` and `serve.log`; the
+   bridge appends to them. `unsent_reply.md` and `builder_last.md` become the pending
+   state. The kickoff files stay where they are.
+4. **Environment.** X's `.env` becomes `project.env_file = ".env"`. N's question polling
    and abort are built in. X's `opencode.json` question deny can stay.
-5. **Retire.** `tools/bridge.py` stays in each repo until the owner removes it; nothing
-   is deleted by the migration.
+5. **Retire.** `tools/bridge.py` stays in each repo until the owner removes it. Nothing is
+   deleted by the migration.
 
-The pinned TUI-created builder sessions lack opencode's question deny (L5). The
-question polling covers them, and `--new-builder` replaces them with a session that has
-the deny.
+The pinned TUI-created builder sessions lack opencode's question deny (L5). The question
+polling covers them, and `--new-builder` replaces them with a session that has the deny.
 
-## 15. Build order
+## 17. Build order
 
-Small commits, each with tests:
+Small commits, each with its tests:
 
-1. Package skeleton, config, statedir and journal.
-2. Protocol, limits and waits.
-3. Backend base, FakeBackend and the engine core (turns, STOP, completion).
+1. Package skeleton, TOML config, statedir and journal.
+2. Protocol (all three grammars), limits and waits.
+3. Backend base, FakeBackend and the engine core (turns, labels, STOP, completion).
 4. Engine: waits, limits, pauses, budget, rotation, `say`, crash recovery.
-5. ClaudeCodeBackend.
-6. OpencodeBackend and server management.
-7. CLI commands and the live view.
-8. `review`, `apply-decisions`, `new`.
-9. Live smoke tests (Haiku, temporary repos under `/tmp`), deleting only the created
-   sessions by exact id, then fixtures.
+5. Planner and contract: `new`, interview, drafting, `approve`, ledger, re-planning,
+   `decide`, drift.
+6. ClaudeCodeBackend.
+7. OpencodeBackend and server management.
+8. CLI commands, the live view, and `review`.
+9. **Live smoke tests**, with Haiku (`claude-haiku-4-5-20251001`) in temporary repos
+   under `/tmp`:
+   - before each one, `pgrep -fl tools/bridge.py`; if anything matches, that test is
+     skipped and the skip noted;
+   - test A: all three roles on Claude Code;
+   - test B: all three roles on opencode, on a free port outside 4096–4098;
+   - each runs `new --auto-approve` and then two exchanges;
+   - afterwards, only the sessions they created are deleted, by exact id, after checking
+     title and directory read-only;
+   - the report says whether opencode lost its login.
 10. `docs/MIGRATION.md` and the README.
