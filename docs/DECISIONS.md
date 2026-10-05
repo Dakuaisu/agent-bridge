@@ -156,3 +156,17 @@ Options:
 The pause comes after the damage, but it stops a second turn from making it worse, and
 `PAUSED.md` names the paths. The absolute-path line in every builder message is the
 preventive half.
+
+## DEC-014 The bridge says when every phase is verified; .omo/ is tool state
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+Two findings from the live runs:
+- **Completion hint.** After verifying the only phase, the Haiku supervisor asked to
+  re-plan a "Phase 2" the PRD never had, instead of writing PROJECT COMPLETE. The bridge
+  now tells the supervisor, as a fact, when every PRD phase has a verified PHASE
+  COMPLETE. It is a hint; the supervisor still decides.
+- **`.omo/` is tool state.** The omo plugin writes `.omo/run-continuation/<session>.json`
+  into the repo during any opencode turn, which tripped the supervisor tripwire. `.omo/`
+  is excluded from repo snapshots like `.bridge/`, and `init` / `new` add it to
+  `.gitignore` when a role uses opencode.

@@ -236,3 +236,10 @@ def test_new_work_after_completion_gets_a_fresh_supervisor(repo: Path, clock: Fa
 def test_nothing_to_do(repo: Path, clock: FakeClock) -> None:
     eng = make_engine(repo, clock, builder=[], supervisor=[])
     assert eng.run() == 2
+
+
+def test_tool_state_folders_never_trip_the_tripwire(repo: Path, clock: FakeClock) -> None:
+    eng = make_engine(repo, clock, builder=["r0", "r1"], supervisor=[FakeStep(text=ok("go"), files={".omo/run-continuation/ses_x.json": "{}"}), DONE])
+    eng.kickoff("go")
+    eng.run()
+    assert "CHANGED THE REPO" not in review_log(repo)

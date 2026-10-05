@@ -390,3 +390,20 @@ def test_phase_complete_is_recorded_in_the_ledger(repo: Path, clock: FakeClock) 
     ledger = (repo / "docs/DECISIONS.md").read_text()
     assert "Phase 1 complete\n- Decided by: supervisor (verified at exchange 1)\n- Status: VERIFIED (phase boundary)" in ledger
     assert eng.current_phase() == "Phase 2 - Printer"
+
+
+def test_supervisor_is_told_when_every_phase_is_verified(repo: Path, clock: FakeClock) -> None:
+    eng = adopt(
+        repo,
+        clock,
+        builder=["Phase 1 complete.", "Phase 2 complete.", "x"],
+        supervisor=[
+            "VERDICT: ok\nSCOPE: Phase 2\nPHASE COMPLETE: Phase 1\nREPLY:\nDo Phase 2.",
+            "VERDICT: ok\nSCOPE: none\nPHASE COMPLETE: Phase 2\nREPLY:\nCheck everything.",
+            DONE,
+        ],
+    )
+    eng.kickoff("go")
+    eng.run()
+    assert "Every phase in the PRD is verified complete" not in eng.backends["supervisor"].sent[1]
+    assert "Every phase in the PRD is verified complete (Phase 1 - Parser, Phase 2 - Printer)" in eng.backends["supervisor"].sent[2]

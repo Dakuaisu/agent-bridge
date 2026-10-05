@@ -174,8 +174,8 @@ def cmd_init(a: argparse.Namespace) -> int:
     print(f"wrote {path}")
     for label, p in (("PRD", cfg.project.prd), ("rules", cfg.project.rules[0]), ("ledger", cfg.project.decisions), ("open items", cfg.project.open_items)):
         print(f"  {label:<11} {p.relative_to(repo)}: {'found' if p.exists() else 'missing'}")
-    if contract.ensure_gitignore(repo):
-        print("added .bridge/ to .gitignore")
+    if contract.ensure_gitignore(repo, (".bridge/", ".omo/") if cfg.uses_opencode() else (".bridge/",)):
+        print("added .bridge/" + (" and .omo/" if cfg.uses_opencode() else "") + " to .gitignore")
     agents = repo / "AGENTS.md"
     if not agents.exists() and not agents.is_symlink():
         print("suggestion: ln -s CLAUDE.md AGENTS.md  (opencode reads AGENTS.md; Claude Code reads CLAUDE.md)")
@@ -215,7 +215,7 @@ def cmd_new(a: argparse.Namespace) -> int:
     atomic_write_text(path, render_config_template(name=a.name or repo.name, created=f"{now():%Y-%m-%d %H:%M}", roles=roles, opencode_port=port))
     cfg = load_config(path)
     sd = StateDir(repo)
-    contract.ensure_gitignore(repo)
+    contract.ensure_gitignore(repo, (".bridge/", ".omo/") if cfg.uses_opencode() else (".bridge/",))
     idea = read_text_arg(a.idea)
     engine = runtime.build_engine(cfg, sd)
     if a.background:

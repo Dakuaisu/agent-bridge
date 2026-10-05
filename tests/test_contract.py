@@ -169,3 +169,10 @@ def test_gitignore(repo: Path) -> None:
     assert contract.ensure_gitignore(repo)
     assert not contract.ensure_gitignore(repo)
     assert (repo / ".gitignore").read_text().count(".bridge/") == 1
+
+
+def test_gitignore_adds_only_missing_entries(repo: Path) -> None:
+    (repo / ".gitignore").write_text("/.bridge\n")
+    assert contract.ensure_gitignore(repo, (".bridge/", ".omo/"))
+    assert (repo / ".gitignore").read_text() == "/.bridge\n.omo/\n"
+    assert not contract.ensure_gitignore(repo, (".bridge/", ".omo/"))

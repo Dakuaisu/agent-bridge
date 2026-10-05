@@ -391,10 +391,12 @@ def ensure_agents_symlink(repo: Path, rules: Path) -> str:
     return "created"
 
 
-def ensure_gitignore(repo: Path) -> bool:
+def ensure_gitignore(repo: Path, entries: tuple[str, ...] = (".bridge/",)) -> bool:
     path = repo / ".gitignore"
     text = _read(path)
-    if any(line.strip() in (".bridge", ".bridge/", "/.bridge", "/.bridge/") for line in text.splitlines()):
+    present = {line.strip().strip("/") for line in text.splitlines()}
+    missing = [e for e in entries if e.strip("/") not in present]
+    if not missing:
         return False
-    atomic_write_text(path, text + ("" if not text or text.endswith("\n") else "\n") + ".bridge/\n")
+    atomic_write_text(path, text + ("" if not text or text.endswith("\n") else "\n") + "".join(f"{e}\n" for e in missing))
     return True

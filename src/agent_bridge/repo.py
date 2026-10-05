@@ -9,7 +9,8 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
-EXCLUDE_STATE = ":(exclude).bridge"
+# Tool state, never project content: the bridge's own folder and the omo opencode plugin's (L22 smoke run).
+EXCLUDES = (":(exclude).bridge", ":(exclude).omo")
 ATTRIBUTION = re.compile(r"(?im)^\s*co-authored-by:|generated (?:with|by) (?:claude|opencode|an? ai)|noreply@anthropic\.com")
 
 
@@ -61,7 +62,7 @@ class Repo:
 
     def status(self) -> dict[str, str]:
         entries: dict[str, str] = {}
-        for line in self.out("status", "--porcelain", "--untracked-files=all", "--", ".", EXCLUDE_STATE).splitlines():
+        for line in self.out("status", "--porcelain", "--untracked-files=all", "--", ".", *EXCLUDES).splitlines():
             if len(line) > 3:
                 path = line[3:]
                 if " -> " in path:
@@ -72,7 +73,7 @@ class Repo:
     def diffs(self) -> dict[str, str]:
         args = ["diff", "--no-color", "--no-ext-diff"]
         args += ["HEAD"] if self.head() else ["--cached"]
-        text = self.out(*args, "--", ".", EXCLUDE_STATE)
+        text = self.out(*args, "--", ".", *EXCLUDES)
         sections: dict[str, str] = {}
         current, buf = None, []
         for line in text.splitlines(keepends=True):

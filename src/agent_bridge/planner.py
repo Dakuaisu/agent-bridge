@@ -346,7 +346,7 @@ class ContractEngine(Engine):
         link = contract.ensure_agents_symlink(self.cfg.project.repo, rules)
         if link not in ("ok", "created"):
             warnings.append(link)
-        contract.ensure_gitignore(self.cfg.project.repo)
+        contract.ensure_gitignore(self.cfg.project.repo, (".bridge/", ".omo/") if self.cfg.uses_opencode() else (".bridge/",))
         pl.update(stage="review", summary=out.summary, kickoff=out.kickoff, warnings=warnings, files=[self.rel(p) for p in files])
         self.st.planning = pl
         atomic_write_text(self.sd.plan / "plan.md", self.plan_summary())
@@ -759,10 +759,22 @@ class ContractEngine(Engine):
         return [f"{display_token(t)} ({reason})" for t, reason in sorted(self.blocked_map().items())]
 
     def supervisor_contract_blocks(self) -> list[Block]:
+        blocks = []
         blocked = self.blocked_tokens()
-        if not blocked:
-            return []
-        return [Block("bridge", f"Blocked: {', '.join(blocked)}. Your SCOPE must avoid them.")]
+        if blocked:
+            blocks.append(Block("bridge", f"Blocked: {', '.join(blocked)}. Your SCOPE must avoid them."))
+        phases = [h.title for h in contract.headings(_read(self.cfg.project.prd)) if contract.phase_token(h.title)]
+        done = {contract.phase_token(d["phase"]) or d["phase"].lower() for d in self.st.phases_done}
+        if phases and all(contract.phase_token(t) in done for t in phases):
+            blocks.append(
+                Block(
+                    "bridge",
+                    f"Every phase in the PRD is verified complete ({', '.join(phases)}). If nothing else in the contract is "
+                    "open, the project is complete: write PROJECT COMPLETE. Items that only the owner can do do not keep it "
+                    "open, and work outside the PRD is not a reason to re-plan.",
+                )
+            )
+        return blocks
 
     def scope_violation(self, out: SupervisorOutput) -> str | None:
         blocked = self.blocked_map()
