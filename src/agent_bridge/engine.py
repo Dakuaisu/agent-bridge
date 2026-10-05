@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field, fields
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
@@ -18,19 +18,34 @@ from agent_bridge.backends.base import (
     AuthFailed,
     Backend,
     BackendError,
+    Cancelled,
     Event,
+    QuestionAsked,
+    RateLimited,
     Reply,
+    SessionLimit,
+    Timeout,
+    TransientError,
     Unsupported,
 )
 from agent_bridge.clock import Clock, iso
-from agent_bridge.config import Config
+from agent_bridge.config import Config, format_duration
 from agent_bridge.journal import Journal
 from agent_bridge.protocol import Block, SupervisorOutput, parse_builder, parse_supervisor, render
 from agent_bridge.repo import Repo, Snapshot, attribution_problems
 from agent_bridge.statedir import StateDir, atomic_write_json, atomic_write_text, read_json
+from agent_bridge.waits import ActiveWait, begin_wait, check_wait, parse_wait_line, pid_start_time
 
 REPORT_CHARS = 24_000
 EXIT_OK, EXIT_UNSUPPORTED, EXIT_PAUSED = 0, 2, 3
+MAX_TIMEOUTS, MAX_QUESTIONS, MAX_ERRORS = 3, 3, 10
+BACKOFF_START, BACKOFF_MAX = 60, 1800
+LIMIT_UNKNOWN_START, LIMIT_UNKNOWN_MAX = 900, 3600
+RESET_MARGIN = 120
+LIMIT_SLEEP_CAP = 48 * 3600
+IDLE_NUDGE_AFTER, IDLE_SLEEP_AFTER = 3, 5
+IDLE_SLEEP_START, IDLE_SLEEP_MAX = 1800, 7200
+SLEEP_STEP, WAIT_POLL = 5.0, 15.0
 
 DEFAULT_DANGER = [
     (re.compile(r"\bgit\s+push\b[^\n]*(?:--force\b|--force-with-lease\b|\s-f\b)"), "force push"),
@@ -60,7 +75,7 @@ class State:
     replan: dict[str, Any] | None = None
     sessions: dict[str, Any] = field(default_factory=dict)
     rotate: dict[str, str] = field(default_factory=dict)
-    counters: dict[str, int] = field(default_factory=dict)
+    counters: dict[str, Any] = field(default_factory=dict)
     feed: list[dict[str, str]] = field(default_factory=list)
     owner_queue: list[dict[str, Any]] = field(default_factory=list)
     supervisor_head: str | None = None
@@ -89,6 +104,16 @@ def new_pending(**kw: Any) -> dict[str, Any]:
     return {"supervisor": None, "supervisor_note": "", "planner": [], "notes": [], "attempt": 0, "in_flight": False, **kw}
 
 
+def set_note(pending: dict[str, Any], kind: str, text: str) -> None:
+    """One note per kind: a second timeout replaces the first resume note instead of stacking."""
+    notes = [n for n in pending.get("notes", []) if not (isinstance(n, dict) and n.get("kind") == kind)]
+    pending["notes"] = [*notes, {"kind": kind, "text": text}]
+
+
+def note_text(note: Any) -> str:
+    return note["text"] if isinstance(note, dict) else str(note)
+
+
 class Engine:
     def __init__(
         self,
@@ -101,6 +126,7 @@ class Engine:
         repo: Repo | None = None,
         confirm: Callable[[str, str], str | None] | None = None,
         on_complete: Callable[[Engine], None] | None = None,
+        pid_start: Callable[[int], str | None] = pid_start_time,
     ) -> None:
         self.cfg = cfg
         self.sd = sd
@@ -110,10 +136,13 @@ class Engine:
         self.repo = repo or Repo(cfg.project.repo)
         self.confirm = confirm
         self.on_complete = on_complete
+        self.pid_start = pid_start
         self.st = State.load(sd.state)
         self.enforcement = {role: b.capabilities().read_only for role, b in backends.items()}
         self._replies_this_run = 0
         self._exchange_limit: int | None = None
+        self._run_started = self.clock.now()
+        self._last_supervisor_context: int | None = None
         self._restore_sessions()
 
     # ------------------------------------------------------------------ state
@@ -175,58 +204,119 @@ class Engine:
 
     # ------------------------------------------------------------------ owner input
 
-    def kickoff(self, text: str, *, origin: str = "owner") -> None:
-        """Queue a first message for the builder; the supervisor sees it in its next turn."""
+    def _new_work(self) -> None:
         if self.st.phase == "COMPLETE" or (self.st.sessions.get("supervisor") or {}).get("closed"):
             self.st.rotate["supervisor"] = "new work after PROJECT COMPLETE"
+        self.st.complete = None
+
+    def kickoff(self, text: str, *, origin: str = "owner") -> None:
+        """A first message for the builder; the supervisor sees it in its next turn."""
+        self._new_work()
+        pending = self.st.pending or new_pending()
         if origin == "owner":
-            self.st.owner_queue.append({"text": text, "to_builder": True, "to_supervisor": True, "delivered": False, "shown": False, "at": iso(self.now())})
-            pending = self.st.pending or new_pending()
+            self._queue_owner(text, to_builder=True, to_supervisor=True)
         else:
-            pending = self.st.pending or new_pending()
             pending["planner"] = [*pending["planner"], text]
         if self.st.phase == "SUPERVISOR_TURN":
             self.j.event("review_skipped", reason="a kickoff replaced the pending review", exchange=self.st.exchange)
             self.st.review = None
+        if self.st.phase == "WAITING" and self.st.wait:
+            pending = self.st.wait.get("pending") or pending
+            self.st.wait = None
         self.st.pending = pending
         self.st.phase = "BUILDER_TURN"
-        self.st.complete = None
         self.save()
         self.j.event("kickoff", origin=origin, text=text)
+
+    def _queue_owner(self, text: str, *, to_builder: bool, to_supervisor: bool) -> None:
+        self.st.owner_queue.append(
+            {"text": text, "to_builder": to_builder, "to_supervisor": to_supervisor, "delivered": False, "shown": False, "at": iso(self.now())}
+        )
+
+    def owner_message(self, text: str, to: str = "both") -> bool:
+        """An owner `say`. Returns True if it is bound for the builder (so it ends a wait)."""
+        to_builder = to in ("both", "builder")
+        to_supervisor = to in ("both", "supervisor")
+        self._queue_owner(text, to_builder=to_builder, to_supervisor=to_supervisor)
+        if to_builder and self.st.phase == "WAITING" and self.st.wait:
+            self.st.wait["interrupted"] = True
+        if to_builder and self.st.phase in ("IDLE", "COMPLETE"):
+            self._new_work()
+            self.st.pending = self.st.pending or new_pending()
+            self.st.phase = "BUILDER_TURN"
+        self.save()
+        self.j.event("owner_message", to=to, text=text)
+        return to_builder
+
+    def take_inbox(self) -> bool:
+        """Deliver queued owner input into the state. True if something is bound for the builder."""
+        for_builder = False
+        for item in self.sd.inbox_peek():
+            if item.kind == "say":
+                for_builder |= self.owner_message(str(item.data.get("text", "")), str(item.data.get("to", "both")))
+            else:
+                for_builder |= self.handle_inbox_item(item.kind, item.data)
+            self.sd.inbox_ack(item)
+        return for_builder
+
+    def handle_inbox_item(self, kind: str, data: dict[str, Any]) -> bool:
+        """Approvals and decisions docs; handled by the planner layer."""
+        self.j.event("inbox_ignored", kind=kind)
+        return False
 
     # ------------------------------------------------------------------ the loop
 
     def run(self, *, exchanges: int | None = None) -> int:
         self._exchange_limit = exchanges
         self._replies_this_run = 0
+        self._run_started = self.now()
         if self.st.phase == "PAUSED":
             self._resume_from_pause()
+        self._recover_in_flight()
         self.j.event("run_start", phase=self.st.phase, exchange=self.st.exchange, limit=exchanges)
         try:
             while True:
                 if self.sd.stop_requested():
                     return self._stop()
-                phase = self.st.phase
-                if phase == "BUILDER_TURN":
-                    code = self._builder_turn()
-                elif phase == "SUPERVISOR_TURN":
-                    if self._exchange_limit is not None and self._replies_this_run >= self._exchange_limit:
-                        self.j.console(f"Done: {self._replies_this_run} exchange(s). Next: the supervisor reviews the last report.")
-                        return EXIT_OK
-                    code = self._supervisor_turn()
-                elif phase == "COMPLETE":
-                    return EXIT_OK
-                elif phase == "PAUSED":
-                    return EXIT_PAUSED
-                else:
-                    self.j.console("Nothing to do: no kickoff, no pending message and no report to review.")
-                    return EXIT_UNSUPPORTED
+                self.take_inbox()
+                cap = self._budget_cap()
+                if cap:
+                    return self.pause("budget", cap)
+                code = self.step()
                 if code is not None:
                     return code
         except FatalError as e:
             self.j.console(f"STOPPED: {e}")
             self.j.review("UNSUPPORTED: run stopped", str(e))
             return EXIT_UNSUPPORTED
+
+    def step(self) -> int | None:
+        phase = self.st.phase
+        if phase == "BUILDER_TURN":
+            return self._builder_turn()
+        if phase == "SUPERVISOR_TURN":
+            if self._exchange_limit is not None and self._replies_this_run >= self._exchange_limit:
+                self.j.console(f"Done: {self._replies_this_run} exchange(s). Next: the supervisor reviews the last report.")
+                return EXIT_OK
+            return self._supervisor_turn()
+        if phase == "WAITING":
+            return self._waiting()
+        if phase == "SLEEPING":
+            return self._sleeping()
+        if phase == "REPLANNING":
+            return self.replanning()
+        if phase == "COMPLETE":
+            return EXIT_OK
+        if phase == "PAUSED":
+            return EXIT_PAUSED
+        if phase in ("INTERVIEW", "DRAFTING", "PLAN_REVIEW"):
+            self.j.console(f"The plan is not approved yet ({phase}); see `agent-bridge status`.")
+            return EXIT_PAUSED
+        self.j.console("Nothing to do: no kickoff, no pending message and no report to review.")
+        return EXIT_UNSUPPORTED
+
+    def replanning(self) -> int | None:
+        return self.pause("error", "REPLANNING needs the planner layer")
 
     def _resume_from_pause(self) -> None:
         pause = self.st.pause or {}
@@ -236,6 +326,31 @@ class Engine:
         self.sd.paused.unlink(missing_ok=True)
         self.save()
         self.j.event("resumed", reason=pause.get("reason"), phase=self.st.phase)
+
+    def _recover_in_flight(self) -> None:
+        st = self.st
+        if st.phase == "BUILDER_TURN" and st.pending and st.pending.get("in_flight"):
+            self.backends["builder"].abort()
+            set_note(st.pending, "restart", prompts.RESTART_NOTE)
+            st.pending["in_flight"] = False
+            self.save()
+            self.j.event("recovered", role="builder", reason="the bridge stopped during a builder turn")
+        if st.phase == "SUPERVISOR_TURN" and st.review and st.review.get("in_flight"):
+            self.backends["supervisor"].abort()
+            st.review["in_flight"] = False
+            self.save()
+            self.j.event("recovered", role="supervisor", reason="the bridge stopped during a supervisor turn")
+
+    def _budget_cap(self) -> str | None:
+        b = self.cfg.budget
+        if b.max_exchanges is not None and self._replies_this_run >= b.max_exchanges and self.st.phase == "SUPERVISOR_TURN":
+            return f"max_exchanges reached: {self._replies_this_run} exchanges in this run"
+        if b.max_wall_time is not None and (self.now() - self._run_started).total_seconds() >= b.max_wall_time:
+            return f"max_wall_time reached: {format_duration(b.max_wall_time)} since this run started"
+        unchanged = self.st.counters.get("unchanged", 0)
+        if b.max_unchanged_exchanges is not None and unchanged >= b.max_unchanged_exchanges and self.st.phase != "WAITING":
+            return f"max_unchanged_exchanges reached: {unchanged} exchanges in a row changed nothing in the repo"
+        return None
 
     # ------------------------------------------------------------------ builder
 
@@ -251,27 +366,29 @@ class Engine:
         for text in p.get("planner", []):
             blocks.append(Block("planner", text))
         for note in p.get("notes", []):
-            blocks.append(Block("bridge", note))
+            blocks.append(Block("bridge", note_text(note)))
         if p.get("supervisor"):
             blocks.append(Block("supervisor", p["supervisor"], note=p.get("supervisor_note", "")))
         return render(blocks), blocks
 
     def blocked_tokens(self) -> list[str]:
+        """Requirements and phases the builder must not touch; filled by the planner layer."""
         return []
 
     def _builder_turn(self) -> int | None:
-        backend = self.backends["builder"]
         p = self.st.pending or new_pending()
         rotate_reason = self.st.rotate.pop("builder", None)
         if rotate_reason:
             old = self.retire_session("builder", rotate_reason)
-            p["notes"] = [prompts.handoff_note(self.cfg, old, rotate_reason), *p.get("notes", [])]
+            set_note(p, "handoff", prompts.handoff_note(self.cfg, old, rotate_reason))
+            self.j.review(f"BUILDER ROTATED ({rotate_reason})", f"retired session {old}")
         self.st.pending = p
         message, blocks = self.builder_message()
         p["attempt"] = p.get("attempt", 0) + 1
         p["in_flight"] = True
         self.save()
         n = self.st.exchange
+        backend = self.backends["builder"]
         self.j.transcript(f"EXCHANGE {n} | to builder ({backend.describe()})", message)
         self.j.event("message", recipient="builder", exchange=n, blocks=[{"origin": b.origin, "note": b.note} for b in blocks])
         before = self.repo.snapshot()
@@ -279,11 +396,12 @@ class Engine:
         try:
             reply = self._send("builder", message)
         except BackendError as e:
+            p["in_flight"] = False
+            self.save()
             return self._turn_failed("builder", e)
         after = self.repo.snapshot()
         self._delivered(blocks)
-        self._after_builder(reply, before, after, started)
-        return None
+        return self._after_builder(reply, before, after, started)
 
     def _delivered(self, blocks: list[Block]) -> None:
         """Mark owner messages delivered, and keep what else the builder was told for the supervisor."""
@@ -302,22 +420,23 @@ class Engine:
             i for i in self.st.owner_queue if (i["to_builder"] and not i["delivered"]) or (i["to_supervisor"] and not i["shown"])
         ]
 
-    def _after_builder(self, reply: Reply, before: Snapshot, after: Snapshot, started: datetime) -> None:
-        cfg = self.cfg
+    def _after_builder(self, reply: Reply, before: Snapshot, after: Snapshot, started: datetime) -> int | None:
+        cfg, st = self.cfg, self.st
         atomic_write_text(self.sd.builder_last, reply.text)
-        report_path = self.sd.turns / f"{self.st.exchange:04d}-builder-report.md"
+        report_path = self.sd.turns / f"{st.exchange:04d}-builder-report.md"
         atomic_write_text(report_path, reply.text)
-        self.j.transcript(f"EXCHANGE {self.st.exchange} | builder report", reply.text)
+        self.j.transcript(f"EXCHANGE {st.exchange} | builder report", reply.text)
         self._check_models("builder", reply)
         self._audit_builder(reply, before, after)
+        self.after_builder_audit(before, after)
         signals = parse_builder(reply.text, now=self.now(), phase_pattern=cfg.rotation.phase_complete_pattern)
         changed = before.fingerprint() != after.fingerprint()
-        self.st.counters["unchanged"] = 0 if changed else self.st.counters.get("unchanged", 0) + 1
+        st.counters["unchanged"] = 0 if changed else st.counters.get("unchanged", 0) + 1
         if reply.context_tokens and reply.context_tokens >= cfg.rotation.builder_max_context_tokens:
-            self.st.rotate["builder"] = f"context reached {reply.context_tokens:,} tokens"
-        self.st.review = {
+            st.rotate["builder"] = f"context reached {reply.context_tokens:,} tokens"
+        st.review = {
             "report": str(report_path),
-            "exchange": self.st.exchange,
+            "exchange": st.exchange,
             "duration_s": (self.now() - started).total_seconds(),
             "changed": changed,
             "wait": signals.wait.describe() if signals.wait else None,
@@ -325,23 +444,31 @@ class Engine:
             "decisions": signals.decisions_needed,
             "phase_claims": signals.phase_claims,
             "context_tokens": reply.context_tokens,
-            "attempt": 0,
             "nudges": [],
         }
-        self.st.pending = None
-        self.st.phase = "SUPERVISOR_TURN"
-        for key in ("timeouts_builder", "questions_builder", "errors_builder"):
-            self.st.counters.pop(key, None)
+        st.pending = None
+        st.phase = "SUPERVISOR_TURN"
+        for key in ("timeouts_builder", "questions_builder", "errors_builder", "limit_sleep_s"):
+            st.counters.pop(key, None)
         self.save()
         self.j.event(
             "builder_report",
-            exchange=self.st.exchange,
+            exchange=st.exchange,
             chars=len(reply.text),
             changed=changed,
             context_tokens=reply.context_tokens,
             decisions=len(signals.decisions_needed),
-            wait=self.st.review["wait"],
+            wait=st.review["wait"],
         )
+        unchanged = st.counters["unchanged"]
+        if unchanged >= IDLE_SLEEP_AFTER and not signals.wait:
+            seconds = min(IDLE_SLEEP_START * 2 ** (unchanged - IDLE_SLEEP_AFTER), IDLE_SLEEP_MAX)
+            self.j.review(f"IDLE BACKSTOP at exchange {st.exchange}", f"{unchanged} exchanges in a row changed nothing; sleeping {format_duration(seconds)} before the supervisor's turn")
+            return self._sleep_until(self.now() + timedelta(seconds=seconds), f"idle backstop: {unchanged} exchanges without a repo change", resume="SUPERVISOR_TURN")
+        return None
+
+    def after_builder_audit(self, before: Snapshot, after: Snapshot) -> None:
+        """Contract drift; filled by the planner layer."""
 
     def _audit_builder(self, reply: Reply, before: Snapshot, after: Snapshot) -> None:
         patterns = list(DEFAULT_DANGER) + [(p, "safety.danger_commands") for p in self.cfg.safety.danger_commands]
@@ -395,6 +522,8 @@ class Engine:
             blocks.append(Block("bridge", prompts.supervisor_reminder(cfg, enforcement)))
         blocks.append(Block("bridge", prompts.REVERIFY))
         blocks.append(Block("bridge", self._since_text(review)))
+        for note in review.get("notes", []):
+            blocks.append(Block("bridge", note))
         if review.get("wait"):
             blocks.append(Block("bridge", f"The builder asked for: {review['wait']}. It is honoured after your reply unless you write NO WAIT or a different WAIT line."))
         if review.get("wait_error"):
@@ -404,7 +533,7 @@ class Engine:
         for claim in review.get("phase_claims", [])[:1]:
             blocks.append(Block("bridge", f'The builder says "{claim}". If you verify that phase\'s exit criteria, write PHASE COMPLETE: <phase>.'))
         unchanged = st.counters.get("unchanged", 0)
-        if unchanged >= 3:
+        if unchanged >= IDLE_NUDGE_AFTER:
             blocks.append(Block("bridge", f"The last {unchanged} exchanges changed nothing in the repo. If the builder is waiting for a job or a time, use a WAIT directive instead of acknowledging."))
         if "builder" in st.rotate:
             blocks.append(Block("bridge", f"The builder's next message opens a fresh session ({st.rotate['builder']}); make your REPLY self-contained."))
@@ -428,6 +557,7 @@ class Engine:
         return message, blocks
 
     def supervisor_contract_blocks(self) -> list[Block]:
+        """The blocked set and contract drift; filled by the planner layer."""
         return []
 
     def _supervisor_rules_text(self) -> str | None:
@@ -466,15 +596,23 @@ class Engine:
         if new_session:
             backend.system_prompt = prompts.supervisor_role(self.cfg, self.enforcement["supervisor"], self._supervisor_rules_text())
         message, _ = self.supervisor_message(new_session=new_session)
+        review["in_flight"] = True
         self.save()
         out = self._ask_supervisor(message)
+        if st.review:
+            st.review["in_flight"] = False
         if out is None or isinstance(out, int):
+            self.save()
             return out
         st.handoff.pop("supervisor", None)
         for item in st.owner_queue:
             if item["to_supervisor"]:
                 item["shown"] = True
         self._prune_owner_queue()
+        for key in ("timeouts_supervisor", "questions_supervisor", "errors_supervisor", "limit_sleep_s"):
+            st.counters.pop(key, None)
+        if self._last_supervisor_context and self._last_supervisor_context >= self.cfg.rotation.supervisor_max_context_tokens:
+            st.rotate["supervisor"] = f"context reached {self._last_supervisor_context:,} tokens"
         return self._apply_supervisor(out)
 
     def _ask_supervisor(self, message: str) -> SupervisorOutput | int | None:
@@ -483,13 +621,14 @@ class Engine:
         self.j.transcript(f"EXCHANGE {n} | to supervisor ({self.backends['supervisor'].describe()})", message)
         nudges: list[str] = self.st.review.setdefault("nudges", []) if self.st.review else []
         text = ""
-        for attempt in range(4):
+        for _ in range(5):
             before = self.repo.snapshot()
             try:
                 reply = self._send("supervisor", message)
             except BackendError as e:
                 return self._turn_failed("supervisor", e)
             after = self.repo.snapshot()
+            self._last_supervisor_context = reply.context_tokens
             self._tripwire("supervisor", reply, before, after)
             self._check_models("supervisor", reply)
             text = reply.text
@@ -502,7 +641,7 @@ class Engine:
             elif out.scope is None and not out.complete:
                 nudge = "no_scope"
             else:
-                nudge = self.scope_violation(out, nudges)
+                nudge = self.scope_violation(out)
             if nudge is None:
                 return out
             if nudge in nudges:
@@ -514,13 +653,11 @@ class Engine:
         return self._malformed("repeated", parse_supervisor(text, now=self.now()))
 
     def _nudge_text(self, nudge: str, out: SupervisorOutput) -> str:
-        return {
-            "empty": prompts.EMPTY_NUDGE,
-            "no_reply": prompts.NO_REPLY_NUDGE,
-            "no_scope": prompts.NO_SCOPE_NUDGE,
-        }.get(nudge) or self.scope_nudge_text(out)
+        fixed = {"empty": prompts.EMPTY_NUDGE, "no_reply": prompts.NO_REPLY_NUDGE, "no_scope": prompts.NO_SCOPE_NUDGE}
+        return fixed.get(nudge) or self.scope_nudge_text(out)
 
-    def scope_violation(self, out: SupervisorOutput, nudges: list[str]) -> str | None:
+    def scope_violation(self, out: SupervisorOutput) -> str | None:
+        """'scope' when SCOPE touches the blocked set; filled by the planner layer."""
         return None
 
     def scope_nudge_text(self, out: SupervisorOutput) -> str:
@@ -528,7 +665,7 @@ class Engine:
 
     def _malformed(self, nudge: str, out: SupervisorOutput) -> SupervisorOutput | int | None:
         if nudge == "empty":
-            return self._turn_failed("supervisor", _transient("supervisor returned no output twice"))
+            return self._turn_failed("supervisor", TransientError("supervisor returned no output twice"))
         if nudge == "no_reply":
             self.j.review(f"SUPERVISOR REPLY WITHOUT REPLY: at exchange {self.st.exchange}", "the whole output was sent to the builder (C5)")
             out.reply = out.raw.strip()
@@ -560,6 +697,7 @@ class Engine:
     def _apply_supervisor(self, out: SupervisorOutput) -> int | None:
         st = self.st
         n = st.exchange
+        review = st.review or {}
         verdict = out.verdict or "(no verdict)"
         st.last_verdict = {"exchange": n, "text": verdict, "at": iso(self.now())}
         self.j.event("verdict", exchange=n, verdict=verdict, scope=out.scope_text, complete=out.complete)
@@ -572,10 +710,14 @@ class Engine:
             return self._complete(out)
         if out.escalate and self.cfg.project.mode == "escalate":
             st.pending = new_pending(supervisor=out.reply)
+            st.review = None
             return self.pause("escalation", out.escalate, resume="BUILDER_TURN")
         handled = self.handle_directives(out)
         if handled is not None:
             return handled
+        if st.phase != "SUPERVISOR_TURN":
+            self.save()
+            return None
         reply_text = out.reply or ""
         note = ""
         if self.confirm is not None:
@@ -586,21 +728,43 @@ class Engine:
                 return EXIT_OK
             if decided != reply_text:
                 reply_text, note = decided, "(edited by the owner)"
-        st.pending = new_pending(supervisor=reply_text, supervisor_note=note)
+        pending = new_pending(supervisor=reply_text, supervisor_note=note)
         st.review = None
         self._replies_this_run += 1
-        self.after_reply(out)
-        if st.phase != "WAITING":
-            st.phase = "BUILDER_TURN"
+        if out.phase_complete:
+            self._phase_complete(out.phase_complete)
+        if out.rotate_builder:
+            st.rotate["builder"] = "ROTATE BUILDER from the supervisor"
+        spec = out.wait
+        if spec is None and review.get("wait") and not out.no_wait:
+            try:
+                spec = parse_wait_line(review["wait"], now=self.now())
+            except ValueError:
+                spec = None
+        if spec is not None:
+            return self._begin_wait(spec, "supervisor" if out.wait else "builder", pending)
+        st.pending = pending
+        st.phase = "BUILDER_TURN"
         self.save()
         return None
 
     def handle_directives(self, out: SupervisorOutput) -> int | None:
-        """REPLAN and friends; extended in later steps. None means: deliver the reply."""
+        """REPLAN; filled by the planner layer. None means: deliver the reply."""
         return None
 
-    def after_reply(self, out: SupervisorOutput) -> None:
-        """WAIT, PHASE COMPLETE and rotation; extended in later steps."""
+    def _phase_complete(self, phase: str) -> None:
+        st = self.st
+        st.phases_done.append({"phase": phase, "exchange": st.exchange, "at": iso(self.now())})
+        self.j.review(f"PHASE COMPLETE: {phase} (verified by the supervisor at exchange {st.exchange})")
+        self.j.event("phase_complete", phase=phase, exchange=st.exchange)
+        if self.cfg.rotation.builder_on_phase_complete:
+            st.rotate["builder"] = f"{phase} complete"
+        if self.cfg.rotation.supervisor_on_phase_complete:
+            st.rotate["supervisor"] = f"{phase} complete"
+        self.on_phase_complete(phase)
+
+    def on_phase_complete(self, phase: str) -> None:
+        """The ledger entry; filled by the planner layer."""
 
     def _complete(self, out: SupervisorOutput) -> int:
         st = self.st
@@ -617,6 +781,74 @@ class Engine:
         if self.on_complete:
             self.on_complete(self)
         return EXIT_OK
+
+    # ------------------------------------------------------------------ waits and sleeps
+
+    def _begin_wait(self, spec: Any, source: str, pending: dict[str, Any]) -> int | None:
+        st = self.st
+        active = begin_wait(spec, now=self.now(), source=source, wait_max=self.cfg.wait_max, pid_start=self.pid_start)
+        st.wait = {"active": active.to_json(), "pending": pending}
+        st.pending = None
+        st.phase = "WAITING"
+        self.save()
+        if active.clamped:
+            self.j.review(f"WAIT CLAMPED at exchange {st.exchange}", f"{spec.describe()} capped at waits.max; it ends at {active.deadline}")
+        self.j.event("wait_start", spec=spec.describe(), source=source, deadline=active.deadline)
+        self.j.console(f"[{self.now():%H:%M:%S}] {spec.describe()} (asked by the {source}; ends by {active.deadline}): sleeping, no model calls")
+        return None
+
+    def _waiting(self) -> int | None:
+        st = self.st
+        active = ActiveWait.from_json(st.wait["active"])
+        spec = active.spec.describe()
+        while True:
+            if self.sd.stop_requested():
+                return None
+            self.take_inbox()
+            if st.wait.get("interrupted"):
+                note = prompts.wait_interrupted_note(spec)
+                outcome = "interrupted by an owner message"
+                break
+            result = check_wait(active, now=self.now(), repo=self.cfg.project.repo, pid_start=self.pid_start)
+            if result.done:
+                note = prompts.wait_over_note(spec, result.detail, result.met)
+                outcome = result.detail
+                break
+            remaining = (datetime.fromisoformat(active.deadline) - self.now()).total_seconds()
+            self.clock.sleep(max(1.0, min(WAIT_POLL, remaining)))
+        pending = st.wait.get("pending") or new_pending()
+        set_note(pending, "wait", note)
+        st.pending = pending
+        st.wait = None
+        st.phase = "BUILDER_TURN"
+        st.counters["unchanged"] = 0
+        self.save()
+        self.j.event("wait_end", spec=spec, outcome=outcome)
+        self.j.console(f"[{self.now():%H:%M:%S}] wait over: {outcome}")
+        return None
+
+    def _sleep_until(self, until: datetime, reason: str, *, resume: str) -> int | None:
+        st = self.st
+        st.sleep = {"until": iso(until), "reason": reason, "resume": resume}
+        st.phase = "SLEEPING"
+        self.save()
+        self.j.event("sleep_start", until=iso(until), reason=reason, resume=resume)
+        self.j.console(f"[{self.now():%H:%M:%S}] sleeping until {until:%Y-%m-%d %H:%M} ({reason}); no model calls")
+        return None
+
+    def _sleeping(self) -> int | None:
+        st = self.st
+        until = datetime.fromisoformat(st.sleep["until"])
+        while self.now() < until:
+            if self.sd.stop_requested():
+                return None
+            self.clock.sleep(min(SLEEP_STEP, (until - self.now()).total_seconds()))
+        resume = st.sleep.get("resume") or "IDLE"
+        self.j.event("sleep_end", reason=st.sleep.get("reason"))
+        st.sleep = None
+        st.phase = resume
+        self.save()
+        return None
 
     # ------------------------------------------------------------------ sending and failures
 
@@ -649,38 +881,103 @@ class Engine:
         self._prune_turn_files()
         return reply
 
-    def _prune_turn_files(self, keep: int = 200) -> None:
+    def _prune_turn_files(self, keep: int = 400) -> None:
         files = sorted(self.sd.turns.glob("*"), key=lambda p: p.stat().st_mtime)
         for p in files[:-keep] if len(files) > keep else []:
             p.unlink(missing_ok=True)
 
+    def _bump(self, key: str) -> int:
+        self.st.counters[key] = self.st.counters.get(key, 0) + 1
+        return self.st.counters[key]
+
+    def _backoff(self, role: str, reason: str, *, start: int = BACKOFF_START, cap: int = BACKOFF_MAX) -> int | None:
+        n = self.st.counters.get(f"errors_{role}", 1)
+        seconds = min(start * 2 ** max(0, n - 1), cap)
+        return self._sleep_until(self.now() + timedelta(seconds=seconds), f"{role}: {reason}; retry in {format_duration(seconds)}", resume=self.st.phase)
+
     def _turn_failed(self, role: str, e: BackendError) -> int | None:
-        """Step-3 handling: unsupported stops; anything else pauses with the error. Extended later."""
-        self.j.event("turn_error", role=role, error=type(e).__name__, message=str(e))
+        st = self.st
+        kind = type(e).__name__
+        self.j.event("turn_error", role=role, error=kind, message=str(e))
+        self.j.console(f"[{self.now():%H:%M:%S}] {role}: {kind}: {str(e)[:300]}")
+        pending = st.pending if role == "builder" else None
         if isinstance(e, Unsupported):
             raise FatalError(f"{role}: {e}")
         if isinstance(e, AuthFailed):
             return self.pause("auth", f"{role}: {e}. Run `claude login` (or re-enroll the pool account), then `agent-bridge run`.")
-        return self.pause("error", f"{role}: {type(e).__name__}: {e}")
+        if isinstance(e, Cancelled):
+            if pending is not None:
+                set_note(pending, "resume", "The owner stopped the bridge (stop --now) during your previous turn, and the bridge aborted it. Check git status and git log before continuing; do not redo committed work.")
+            elif st.review is not None:
+                st.review["notes"] = ["The owner stopped the bridge (stop --now) during your previous turn; review the report below again."]
+            self.save()
+            return None
+        if isinstance(e, (SessionLimit, RateLimited)):
+            reset = e.reset_at
+            if reset is None and isinstance(e, SessionLimit):
+                n = self._bump(f"limit_unknown_{role}")
+                reset = self.now() + timedelta(seconds=min(LIMIT_UNKNOWN_START * 2 ** (n - 1), LIMIT_UNKNOWN_MAX))
+            if reset is not None:
+                until = max(reset, self.now()) + timedelta(seconds=RESET_MARGIN)
+                slept = st.counters.get("limit_sleep_s", 0) + (until - self.now()).total_seconds()
+                if slept > LIMIT_SLEEP_CAP:
+                    return self.pause("limits", f"{role}: usage limits kept the run asleep for more than 48 hours; last: {e}")
+                st.counters["limit_sleep_s"] = slept
+                if pending is not None:
+                    set_note(pending, "limit", prompts.limit_note(f"{self.now():%H:%M}", str(e)[:200]))
+                self.j.review(f"USAGE LIMIT ({role}) at exchange {st.exchange}", f"{e}\nsleeping until {until:%Y-%m-%d %H:%M}")
+                return self._sleep_until(until, f"{role}: usage limit until {reset:%Y-%m-%d %H:%M}", resume=st.phase)
+            self._bump(f"errors_{role}")
+            return self._backoff(role, f"rate limited: {e}")
+        if isinstance(e, Timeout):
+            n = self._bump(f"timeouts_{role}")
+            if n >= MAX_TIMEOUTS:
+                return self.pause("repeated timeouts", f"{role}: {n} timeouts in a row (each {format_duration(self.backends[role].cfg.timeout)}); last: {e}")
+            if pending is not None:
+                set_note(pending, "resume", prompts.resume_note(self.backends[role].cfg.timeout))
+                self.save()
+                return None
+            self._bump(f"errors_{role}")
+            return self._backoff(role, f"timed out: {e}")
+        if isinstance(e, QuestionAsked):
+            n = self._bump(f"questions_{role}")
+            if n >= MAX_QUESTIONS:
+                return self.pause("question tool", f"{role}: called an interactive question tool {n} times in a row: {e.questions}")
+            self.j.review(f"QUESTION TOOL ABORTED ({role}, {n} in a row)", "\n".join(e.questions))
+            if pending is not None:
+                set_note(pending, "question", prompts.question_note(e.questions))
+            elif st.review is not None:
+                st.review["notes"] = ["Your previous turn called an interactive question tool; nobody can answer it, so the bridge rejected it and aborted the turn. Never use it: decide, or put the question in your REPLY."]
+            self.save()
+            return None
+        n = self._bump(f"errors_{role}")
+        if n >= MAX_ERRORS:
+            return self.pause("repeated errors", f"{role}: {n} errors in a row; last: {kind}: {e}")
+        return self._backoff(role, f"{kind}: {str(e)[:200]}")
 
     # ------------------------------------------------------------------ stop and pause
 
     def unsent_message(self) -> str | None:
-        if self.st.pending and (self.st.pending.get("supervisor") or self.st.pending.get("planner") or self.st.pending.get("notes")):
+        st = self.st
+        pending = st.pending
+        if pending is None and st.wait:
+            pending = st.wait.get("pending")
+        if not pending or not (pending.get("supervisor") or pending.get("planner") or pending.get("notes")):
+            if not any(i["to_builder"] and not i["delivered"] for i in st.owner_queue):
+                return None
+        saved = st.pending
+        st.pending = pending or new_pending()
+        try:
             return self.builder_message()[0]
-        if self.st.wait and self.st.wait.get("pending"):
-            saved, self.st.pending = self.st.pending, self.st.wait["pending"]
-            try:
-                return self.builder_message()[0]
-            finally:
-                self.st.pending = saved
-        return None
+        finally:
+            st.pending = saved
 
     def _stop(self) -> int:
         unsent = self.unsent_message()
         if unsent:
             atomic_write_text(self.sd.unsent, unsent)
-        self.pause("stop", f"STOP file found; unsent message saved to {self.sd.unsent}" if unsent else "STOP file found", resume=self.st.phase)
+        detail = f"STOP file found; unsent message saved to {self.sd.unsent}" if unsent else "STOP file found"
+        self.pause("stop", detail, resume=self.st.phase)
         self.j.console(f"Stopped at exchange {self.st.exchange}." + (f" Unsent message: {self.sd.unsent}" if unsent else ""))
         return EXIT_OK
 
@@ -692,14 +989,14 @@ class Engine:
         st.pause = {"reason": reason, "detail": detail, "resume": resume_phase, "at": iso(self.now())}
         st.phase = "PAUSED"
         self.save()
-        atomic_write_text(self.sd.paused, self._pause_summary())
+        atomic_write_text(self.sd.paused, self.pause_summary())
         if reason != "stop":
             self.j.review(f"PAUSED ({reason}) at exchange {st.exchange}", detail)
         self.j.event("paused", reason=reason, detail=detail, resume=resume_phase)
         self.j.console(f"PAUSED ({reason}): {detail}")
         return EXIT_OK if reason == "stop" else EXIT_PAUSED
 
-    def _pause_summary(self) -> str:
+    def pause_summary(self) -> str:
         st = self.st
         pause = st.pause or {}
         lines = [
@@ -727,9 +1024,3 @@ class _StopNow:
 
     def is_set(self) -> bool:
         return self.sd.stop_now_requested()
-
-
-def _transient(message: str) -> BackendError:
-    from agent_bridge.backends.base import TransientError
-
-    return TransientError(message)
