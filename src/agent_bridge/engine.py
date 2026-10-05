@@ -182,7 +182,7 @@ class Engine:
                 "model": backend.cfg.engine_model(),
                 "id": session_id,
                 "title": backend._title,
-                "directory": str(self.cfg.project.repo),
+                "directory": str(backend.workdir),
                 "created": iso(self.now()),
                 "retired": None,
             }

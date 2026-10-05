@@ -54,6 +54,7 @@ def test_supervisor_command_is_read_only_enforced_and_neutral(setup) -> None:
     assert args[args.index("--permission-prompts") + 1] == "none"
     assert "--permission-mode" not in args
     assert first["cwd"] == str(neutral_dir("demo", sup.repo, "supervisor").resolve())
+    assert sup.workdir == neutral_dir("demo", sup.repo, "supervisor") and make("builder").workdir == sup.repo
     assert first["stdin"] == "[bridge] review this"
     assert first["env"]["ANTHROPIC_API_KEY"] is False and first["env"]["CLAUDECODE"] is False
     assert reply.served_models == {"claude-fable-5-1"} and reply.context_tokens == 115

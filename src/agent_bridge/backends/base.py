@@ -159,6 +159,11 @@ class Backend(ABC):
     def describe(self) -> str:
         return f"{self.engine} {self.cfg.engine_model()}"
 
+    @property
+    def workdir(self) -> Path:
+        """Where the agent CLI runs; it decides where the engine files the session."""
+        return self.repo
+
     @abstractmethod
     def version_check(self) -> str: ...
 

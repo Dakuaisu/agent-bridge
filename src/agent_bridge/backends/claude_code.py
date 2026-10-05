@@ -99,6 +99,10 @@ class ClaudeCodeBackend(Backend):
     def cwd(self) -> Path:
         return self.repo if self.role == "builder" else neutral_dir(self.project, self.repo, self.role)
 
+    @property
+    def workdir(self) -> Path:
+        return self.cwd
+
     def _exe(self) -> str:
         exe = shutil.which(self.binary) if os.sep not in self.binary else self.binary
         if not exe or not Path(exe).exists():
