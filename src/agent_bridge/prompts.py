@@ -277,9 +277,9 @@ TO SUPERVISOR:
 def planner_interview(cfg: Config, tracked_files: int) -> str:
     state = f"it has {tracked_files} tracked files; read what is there first" if tracked_files else "it is empty"
     return (
-        f"The repository is at {cfg.project.repo}; {state}. Then return QUESTIONS: one batch of at most 8 numbered "
-        "questions whose answers change the plan, each with \"Recommended:\" and \"Why it matters:\". If nothing "
-        "needs the owner, return PLAN directly."
+        f"The repository is at {cfg.project.repo}; {state}. Return QUESTIONS only: one batch of at most 8 numbered "
+        "questions whose answers change the plan, each with \"Recommended:\" and \"Why it matters:\". You draft the "
+        "plan after the owner answers. You never write code or project files: the builder does that."
     )
 
 
@@ -297,27 +297,47 @@ def planner_draft(cfg: Config, config_text: str, may_ask_again: bool) -> str:
         if may_ask_again
         else ""
     )
-    return f"""Now return PLAN: a SUMMARY line, then these five files as === FILE <path> === ... === END FILE === blocks,
-then KICKOFF:.{again}
+    return f"""Now return PLAN: a SUMMARY line, then the contract files as === FILE <path> === ... === END FILE === blocks,
+then KICKOFF:. These are planning documents only; never return code or other project files.{again}
 
-1. {rel(cfg, p.prd)}: a title, then "## Goals"; "## Non-goals"; "## Requirements", numbered R-1, R-2, ... (one
-   per line, each testable); one "## Phase N - <name>" section per phase in build order, each with "Scope:",
-   "Exit criteria:" as a bullet list of checkable conditions, and "Owner-only:" items (work only the owner can
-   do: accounts, money, human judgement, other machines); and "## Results", saying what counts as a real
-   result, what is a development run, and that every reported number gets a row in {rel(cfg, p.results)}.
-2. {rel(cfg, p.rules[0])}: the project's rules for the builder: what the project is, its domain traps,
-   testing and style, and the honesty rules (no fabricated numbers, no tuning thresholds to pass, development
-   runs labelled as such, failures reported as failures). The bridge appends its own operational rules; do not
-   repeat them.
-3. {rel(cfg, p.decisions)}: the decision ledger, seeded with your design choices and the owner's answers, one
-   entry per decision: "## DEC-001 <title>", then Context, Options, Decision and Why. The bridge numbers the
-   entries and writes their "Decided by" and "Status" lines.
-4. {rel(cfg, p.open_items)}: "## OPEN-001 <title>" entries with "- Status: OPEN" or
-   "- Status: OWNER-BLOCKED", what it is, why it matters and the next action. List every owner-only item known
-   up front as OWNER-BLOCKED.
-5. bridge.toml: start from the file below. Keep the engine and model of [planner], [supervisor] and [builder]
-   exactly as they are; set the budget and rotation values to suit the plan. Never set git.push = "allowed" or
-   billing.mode = "api-key": those settings are the owner's.
+1. {rel(cfg, p.prd)}, in exactly this shape (keep the headings word for word):
+   # <project name>: PRD
+   ## Goals
+   - <goal>
+   ## Non-goals
+   - <what is out of scope>
+   ## Requirements
+   - R-1: <one testable requirement>
+   - R-2: <another>
+   ## Phase 1 - <name>
+   Scope: R-1, R-2
+   Exit criteria:
+   - <a checkable condition>
+   Owner-only:
+   - <work only the owner can do (accounts, money, human judgement, other machines), or "none">
+   (one "## Phase N - <name>" section per phase, in build order)
+   ## Results
+   <what counts as a real result and what is a development run; every reported number gets a row in
+   {rel(cfg, p.results)}>
+2. {rel(cfg, p.rules[0])}: the project's rules for the builder: what the project is, its domain traps, testing
+   and style, and the honesty rules (no fabricated numbers, no tuning thresholds to pass, development runs
+   labelled as such, failures reported as failures). The bridge appends its own operational rules.
+3. {rel(cfg, p.decisions)}, one entry per design choice and per answer the owner gave:
+   # Decisions
+   ## DEC-001 <title>
+   Context: <...>
+   Options: <...>
+   Decision: <...>
+   Why: <...>
+   (the bridge numbers the entries and adds their "Decided by" and "Status" lines)
+4. {rel(cfg, p.open_items)}:
+   # Open items
+   ## OPEN-001 <title>
+   - Status: OPEN   (or OWNER-BLOCKED for work only the owner can do)
+   <what it is, why it matters, the next action>
+5. bridge.toml is optional. Leave it out to keep the current file. To change budget or rotation values, return the
+   current file below with only those values changed and every other line exactly as it is. Never set
+   git.push = "allowed" or billing.mode = "api-key": those settings are the owner's.
 
 KICKOFF: the builder's first instruction: commit the contract files by explicit path (the PRD, the rules,
 AGENTS.md, the ledger, the open items and bridge.toml), with no Co-Authored-By line, then start Phase 1.

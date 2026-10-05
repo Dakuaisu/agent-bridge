@@ -463,7 +463,8 @@ step.
    `.bridge/state.json`, so the planner can start before `bridge.toml` exists.
 3. **Interview.**
    - The planner reads the repo (read-only) and returns one batch of numbered questions,
-     at most 8, each with a recommended answer and what changes with it.
+     at most 8, each with a recommended answer and what changes with it. It always asks
+     first: a PLAN at this stage is refused (DEC-010).
    - It may ask one follow-up batch, only when an answer leaves a choice it cannot
      settle conservatively.
 4. **Answers.**
@@ -491,7 +492,7 @@ step.
 | `CLAUDE.md` | project rules, including the honesty rules: no fabricated numbers, no tuning thresholds to pass, dev runs labelled as such, failures reported as failures | non-empty; the bridge adds its own block (6.3) |
 | `docs/DECISIONS.md` | the decision ledger, seeded with the planner's design choices and the interview answers | entries in the ledger format (6.5) |
 | `docs/OPEN.md` | open questions and OWNER-BLOCKED items known up front | every entry has a status: OPEN, OWNER-BLOCKED or RESOLVED |
-| `bridge.toml` | roles, engines, models, budgets | parses with `tomllib` and validates (section 9); owner-only settings below |
+| `bridge.toml` | roles, engines, models, budgets; optional in the PLAN, since leaving it out keeps the valid provisional file (DEC-011) | parses with `tomllib` and validates (section 9); owner-only settings below |
 
 - Any other path is refused. Paths come from `[project]`, so a migrated project keeps
   `docs/TRADEOFFS.md` as its ledger.
@@ -548,7 +549,10 @@ touches text outside the markers. On a migrated project the block is added only 
 - **Adopting an existing contract.** A project that already has a PRD and rules (the
   three migrated projects) skips the planner. `init` writes `bridge.toml`, and `approve`
   adopts the current files as the approved contract. The PRD structure checks are
-  warnings there, not errors.
+  warnings there, not errors, but the PRD and the rules must exist.
+- **Unfinished planning.** `approve` refuses while the planner has not finished (an open
+  interview, or a draft that failed the checks). `agent-bridge say` answers the planner in
+  both cases (DEC-012).
 
 ### 6.5 Ledger
 

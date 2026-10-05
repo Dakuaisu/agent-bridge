@@ -90,14 +90,51 @@ def test_auto_approve_runs_from_idea_to_completion(repo: Path, clock: FakeClock)
 
 def test_plan_that_fails_the_checks_twice_pauses(repo: Path, clock: FakeClock) -> None:
     bad = plan_text(skip=("docs/OPEN.md",), prd="# PRD\n## Goals\n- x\n")
-    eng = engine(repo, clock, planner=[bad, bad], builder=[], supervisor=[])
-    eng.plan_new("idea", auto_approve=False)
+    eng = engine(repo, clock, planner=[QUESTIONS, bad, bad], builder=[], supervisor=[])
+    eng.plan_new("idea", auto_approve=True)
     assert eng.run() == 3
     st = state(repo)
     assert st.pause["reason"] == "plan" and "missing file docs/OPEN.md" in st.pause["detail"]
-    fix = eng.backends["planner"].sent[1]
+    fix = eng.backends["planner"].sent[2]
     assert fix.startswith("[bridge] The bridge could not accept your output:") and "PRD: no Results heading" in fix
     assert not (repo / "docs/PRD.md").exists()
+
+
+def test_interview_must_ask_before_drafting(repo: Path, clock: FakeClock) -> None:
+    eng = engine(repo, clock, planner=[plan_text(), QUESTIONS], builder=[], supervisor=[])
+    eng.plan_new("idea", auto_approve=False)
+    assert eng.run() == 3
+    assert "return QUESTIONS first" in eng.backends["planner"].sent[1]
+    assert state(repo).phase == "INTERVIEW"
+
+
+def test_bridge_toml_is_optional_in_the_plan(repo: Path, clock: FakeClock) -> None:
+    eng = engine(repo, clock, planner=[QUESTIONS, plan_text(skip=("bridge.toml",))], builder=[], supervisor=[])
+    before = (repo / "bridge.toml").read_text()
+    eng.plan_new("idea", auto_approve=False)
+    eng.run()
+    eng.plan_answer("use your recommendations")
+    assert eng.run() == 3
+    assert state(repo).phase == "PLAN_REVIEW" and (repo / "bridge.toml").read_text() == before
+
+
+def test_answers_after_a_failed_plan_restart_drafting(repo: Path, clock: FakeClock) -> None:
+    bad = plan_text(prd="# PRD\n")
+    eng = engine(repo, clock, planner=[QUESTIONS, bad, bad, plan_text()], builder=[], supervisor=[])
+    eng.plan_new("idea", auto_approve=False)
+    eng.run()
+    eng.plan_answer("1: plain text")
+    assert eng.run() == 3 and state(repo).pause["reason"] == "plan"
+    assert eng.awaiting_answers()
+    eng.plan_answer("use your recommendations")
+    assert eng.run() == 3
+    assert state(repo).phase == "PLAN_REVIEW"
+
+
+def test_adopting_needs_the_prd_and_rules(repo: Path, clock: FakeClock) -> None:
+    eng = engine(repo, clock, builder=[], supervisor=[])
+    with pytest.raises(PlanError, match="docs/PRD.md, CLAUDE.md missing"):
+        eng.approve_plan(adopt=True)
 
 
 @pytest.mark.parametrize(
@@ -109,10 +146,10 @@ def test_plan_that_fails_the_checks_twice_pauses(repo: Path, clock: FakeClock) -
     ],
 )
 def test_planner_config_limits_under_auto_approve(repo: Path, clock: FakeClock, extra: str, error: str) -> None:
-    eng = engine(repo, clock, planner=[plan_text(toml_extra=extra), plan_text()], builder=["x"], supervisor=[DONE])
+    eng = engine(repo, clock, planner=[QUESTIONS, plan_text(toml_extra=extra), plan_text()], builder=["x"], supervisor=[DONE])
     eng.plan_new("idea", auto_approve=True)
     eng.run()
-    assert error in eng.backends["planner"].sent[1]
+    assert error in eng.backends["planner"].sent[2]
 
 
 def test_run_refuses_without_a_contract(repo: Path, clock: FakeClock) -> None:

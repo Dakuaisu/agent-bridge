@@ -248,6 +248,11 @@ def cmd_approve(a: argparse.Namespace) -> int:
         raise runtime.UsageError(f"a bridge is running (pid {holder.get('pid')}); stop it before approving the plan")
     engine = runtime.build_engine(cfg, sd)
     st = engine.st
+    if st.planning and st.planning.get("stage") != "approved" and st.phase != "PLAN_REVIEW":
+        raise runtime.UsageError(
+            f"the planner has not finished ({st.phase}); `agent-bridge run` continues the planning, or answer it with "
+            f"`agent-bridge say`. The last check failures are in {sd.plan / 'errors.md'}"
+        )
     if st.phase == "PLAN_REVIEW":
         def approve_and_run() -> int:
             for note in engine.approve_plan():
@@ -499,7 +504,8 @@ def cmd_say(a: argparse.Namespace) -> int:
     text = read_text_arg(a.message)
     holder = lock_holder(sd.lock)
     st = State.load(sd.state)
-    if st.phase == "INTERVIEW" and not holder:
+    engine = runtime.build_engine(cfg, sd, live=False) if not holder else None
+    if engine is not None and engine.awaiting_answers():
         engine = runtime.build_engine(cfg, sd)
         engine.plan_answer(text)
         return start(engine, a, ["say", "(answers)"], lambda: converse(engine, None))

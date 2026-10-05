@@ -102,3 +102,37 @@ If the planner's answer to a supervisor REPLAN fails the bridge's checks twice (
 example a FIND that does not match), the supervisor is told the plan is unchanged and
 continues under the current contract; the failure goes to `review.log`. For `new` and
 `decide`, where the owner is waiting on the result, the run pauses instead.
+
+## DEC-010 The planner always interviews first
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+DESIGN v3 let the planner skip the questions and return PLAN directly. In the first live
+smoke test, Haiku did exactly that and returned the project's code files
+(`wordcount.py`, `test_wordcount.py`) instead of the contract. The bridge's allowlist
+refused them, but the turn was wasted. The interview now accepts only QUESTIONS, which is
+also what the owner specified ("interviews me with a short batch of numbered
+questions"). The drafting instructions now carry an exact skeleton for each file.
+
+## DEC-011 bridge.toml is optional in the planner's PLAN
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+The bridge writes a valid provisional `bridge.toml` from the `new` flags before the
+planner runs. In the live test, Haiku invented its own format (no `version`, unknown
+`roles` and `description` keys), and that failed the whole plan twice. The planner now
+returns `bridge.toml` only to change budget or rotation values, as an edit of the current
+file. Engines and models stay exactly as the owner gave them either way.
+
+## DEC-012 approve refuses unfinished planning, and adoption needs the files
+- Decided by: build agent (overnight build, 2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+Found live: after the planner's draft failed the checks, `approve` took the "adopt an
+existing contract" path and recorded hashes of files that did not exist. Two changes:
+- `approve` now refuses while planning is unfinished and says how to continue;
+- adopting requires the PRD and the rules to exist.
+
+`say` now answers the planner whenever it waits for the owner. That includes a draft
+paused on failed checks, where `say` previously queued the answers as a message for the
+builder.

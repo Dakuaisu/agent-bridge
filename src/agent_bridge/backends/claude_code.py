@@ -317,4 +317,6 @@ class _StreamParser:
         elif kind == "result":
             self.result = data
         elif kind == "system":
-            self.on_event(Event("status", str(data.get("subtype", "")), data={k: v for k, v in data.items() if k != "type"}))
+            subtype = str(data.get("subtype", ""))
+            if any(word in subtype for word in ("retry", "limit", "error", "compact")):
+                self.on_event(Event("status", subtype, data={k: v for k, v in data.items() if k != "type"}))

@@ -32,7 +32,8 @@ def render_event(e: dict[str, Any], *, foreground: bool = False) -> str | None:
     role = str(e.get("role", ""))
     if kind == "turn_start":
         session = e.get("session") or "new session"
-        return f"{t} == exchange {e.get('exchange')} == {role} ({e.get('engine')}, {session})"
+        label = "planner" if role == "planner" else f"exchange {e.get('exchange')}"
+        return f"{t} == {label} == {role} ({e.get('engine')}, {session})"
     if kind == "agent":
         sub = e.get("type")
         if sub == "tool":

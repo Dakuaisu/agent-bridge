@@ -244,3 +244,12 @@ def test_bad_config_is_a_usage_error(repo: Path, fakes: Fakes, capsys: pytest.Ca
     (repo / "bridge.toml").write_text("version = 1\n[builder]\nengnie = 'x'\n")
     assert run("status", "--repo", str(repo)) == 2
     assert "builder.engnie: unknown key" in capsys.readouterr().err
+
+
+def test_approve_refuses_while_planning_is_unfinished(tmp_path: Path, fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    project = tmp_path / "proj"
+    fakes.scripts["planner"] = [QUESTIONS]
+    assert run("new", "idea", "--repo", str(project)) == 3
+    assert run("approve", "--repo", str(project)) == 2
+    assert "the planner has not finished (INTERVIEW)" in capsys.readouterr().err
+    assert State.load(project / ".bridge/state.json").contract is None

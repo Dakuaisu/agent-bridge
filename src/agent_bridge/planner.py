@@ -196,6 +196,8 @@ class ContractEngine(Engine):
         pl.pop("fix", None)
         if out.kind == "questions" and not out.errors and (stage == "interview" or pl.get("batches", 0) < 2):
             return self._interview(out, pl, purpose="new")
+        if stage == "interview":
+            return self._plan_retry(out.errors or ["return QUESTIONS first: the owner answers them before you draft the plan"])
         if out.kind == "plan":
             errors, files, warnings = self.validate_plan(out)
             if errors:
@@ -234,8 +236,19 @@ class ContractEngine(Engine):
         self.j.console(f"The planner asks:\n\n{text}\n\nAnswer with `agent-bridge say \"<answers>\"`, or `agent-bridge say \"use your recommendations\"`.")
         return EXIT_PAUSED
 
+    def awaiting_answers(self) -> bool:
+        """The planner is waiting for the owner: an open interview, or planning paused on failed checks."""
+        if self.st.phase == "INTERVIEW":
+            return True
+        pause = self.st.pause or {}
+        return self.st.phase == "PAUSED" and pause.get("resume") in ("PLANNING", "INTERVIEW") and (self.st.planning or {}).get("stage") != "approved"
+
     def plan_answer(self, text: str) -> None:
+        if self.st.phase == "PAUSED":
+            self.st.pause = None
+            self.sd.paused.unlink(missing_ok=True)
         pl = self.st.planning or {}
+        pl.pop("fix", None)
         answer = text.strip() or "use your recommendations (the owner sent an empty reply)"
         pl.setdefault("answers", []).append(answer)
         pl.pop("auto_answers", None)
@@ -274,7 +287,7 @@ class ContractEngine(Engine):
                 continue
             files[path] = f.content
         for path, name in wanted.items():
-            if path not in files:
+            if path not in files and path != cfg.path.resolve():
                 errors.append(f"missing file {name}")
         prd = cfg.project.prd.resolve()
         if prd in files:
@@ -359,6 +372,9 @@ class ContractEngine(Engine):
         notes: list[str] = []
         decisions = cfg.project.decisions
         if adopt:
+            missing = [self.rel(p) for p in (cfg.project.prd, cfg.project.rules[0]) if not p.exists()]
+            if missing:
+                raise PlanError(f"cannot adopt a contract: {', '.join(missing)} missing")
             notes += [f"warning: {p}" for p in contract.lint_prd(_read(cfg.project.prd))]
         elif not auto:
             text = _read(decisions)
