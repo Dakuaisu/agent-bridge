@@ -2,8 +2,10 @@
 
 Status: OPEN, OWNER-BLOCKED or RESOLVED.
 
-## OPEN-001 The `claude` CLI login on this machine had expired: OWNER-BLOCKED
-- Status: OWNER-BLOCKED
+## OPEN-001 The `claude` CLI login on this machine had expired
+- Status: RESOLVED (2026-10-06): `claude auth status` reported `loggedIn: true` again, and
+  the Claude Code smoke tests at 02:30, 02:34 and 05:12 made real calls. No re-login was
+  done by the build. The underlying shared-login risk (INVENTORY L18) remains.
 - Found: 2026-10-06, while checking which Opus id Claude Code serves.
 - Evidence:
   - `claude auth status` reported `loggedIn: true`.
