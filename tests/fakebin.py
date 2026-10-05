@@ -22,6 +22,15 @@ with open(record, "a") as f:
     f.write(json.dumps(entry) + "\n")
 if args[:1] == ["--version"]:
     print(scenario.get("version", "0.0.0")); sys.exit(0)
+if args[:1] == ["serve"]:
+    import http.server
+    port = int(args[args.index("--port") + 1])
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = json.dumps({{"healthy": True, "version": scenario.get("version", "1.18.30")}}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(body)
+        def log_message(self, *a): pass
+    http.server.HTTPServer(("127.0.0.1", port), H).serve_forever()
 if args[:2] == ["auth", "status"]:
     print(json.dumps(scenario.get("auth", {{"loggedIn": True, "authMethod": "claude.ai", "subscriptionType": "max"}}))); sys.exit(0)
 turns = [c for c in calls if c["args"][:1] in (["-p"], ["run"])]
