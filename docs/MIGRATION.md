@@ -188,7 +188,7 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
   bridge finds phases only as `Phase N` headings. For X and N the supervisor works from
   `phases = "PRD section 9"`, and PHASE COMPLETE still rotates the builder and is
   recorded, but the "every phase verified" hint and the current-phase line given to the
-  planner are missing. Untested on these PRDs: no migration was run.
+  planner are missing. Untested on these PRDs: neither project has moved yet.
 
 ## 5. Rolling back
 
@@ -204,13 +204,14 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
 
 ## 6. What happened on the FillingQA move (2026-10-06)
 
-From FillingQA's `.bridge/` logs, its git history and the UI's command log. FillingQA's
-local folder is `~/FillingQA`.
+From FillingQA's `.bridge/` logs, its git history and the UI's command log
+(`~/.local/state/agent-bridge/ui/`). Times are local (+05:30). FillingQA's local folder is
+`~/FillingQA`.
 
-**The steps.** The owner moved it with the terminal UI:
-1. **Set up this repo** ran `init --write-rules --adopt-legacy` (15:01) with the default
-   engines, then `check`.
-2. `approve --no-run` (15:03:11) adopted the contract: `DEC-001` in `docs/TRADEOFFS.md`.
+**The steps.** The owner moved it with the terminal UI. Its command log shows:
+1. `init --write-rules --adopt-legacy` (15:01:34), with the default engines, then `check`.
+2. `approve --no-run` (15:03:10). It adopted the contract as `DEC-001` in
+   `docs/TRADEOFFS.md`.
 3. `run --forever` (15:03:49).
 
 Steps 1, 3 and 7 of section 2 were not done then: there was no `docs/SUPERVISOR.md`,
@@ -221,49 +222,54 @@ Steps 1, 3 and 7 of section 2 were not done then: there was no `docs/SUPERVISOR.
   `claude-fable-5-1` (max), supervisor `claude-fable-5-1` (xhigh), builder
   `claude-opus-5-5`.
 - Every turn was served by the configured model.
-- The old opencode sessions were not adopted, because no role is on opencode; both roles
-  that ran started fresh sessions.
+- Both roles that ran started fresh sessions. The old bridge's opencode sessions were not
+  resumed.
 
-**What the loop did,** 15:03 to 15:11:
+**What the loop did,** 15:03:51 to 15:11:37:
 - **Exchange 0, the builder** (32 s).
-  - Its first message was the old bridge's stale unsent reply, "Noted. Wait." from
-    2026-10-03, delivered because of `--adopt-legacy`.
+  - Its first message carried the old bridge's stale unsent reply, "Noted. Wait." from
+    2026-10-03, labelled `[supervisor] (saved by the old bridge when it stopped)`.
+    `--adopt-legacy` had queued it.
   - It committed the bridge's own records as `50c46d7`: the DEC-001 entry, the
     `CLAUDE.md` block and `bridge.toml`.
   - It ended with `WAIT UNTIL 2026-10-07T09:00`.
 - **Exchange 1, the supervisor** (180 s, ending at 126,585 tokens of context).
-  - It found those records in the repo (it noted it could not recompute the hashes with its
-    read-only tools) and wrote `NO WAIT`.
-  - It gave one instruction: create `docs/RESULTS.md`, the results register that
-    `bridge.toml` names and the rules block requires.
+  - It accepted those records. It noted that its read-only tools could not recompute the
+    hashes or read git, so the hash match rested on the builder's report.
+  - It wrote `NO WAIT` and gave one task: create `docs/RESULTS.md`, the results register
+    that `bridge.toml` names and the rules block in `CLAUDE.md` requires.
 - **Exchange 1, the builder** (254 s).
   - It committed `b609a13`: `docs/RESULTS.md` with 201 rows copied from committed run
-    files, all marked `development`, plus `DEC-002` (an autonomous decision, for the
-    owner to review).
+    files, all marked `development`.
+  - The same commit adds `DEC-002`: the supervisor's labelling rule, recorded as an
+    autonomous decision for the owner to review.
   - It again ended with `WAIT UNTIL 2026-10-07T09:00`.
-- **The stop.** The owner pressed stop at 15:09. The bridge stopped after that turn, at
-  15:11:37, before the supervisor reviewed the second report.
+- **The stop.** The owner pressed stop at 15:09:17. The running turn finished first, and
+  the bridge paused at 15:11:37, before the supervisor reviewed the second report. The
+  next run starts with that review.
 - `review.log` holds no alerts for the run, only the contract approval.
 
-**After the check,** at 15:45:
+**Fixes after the run,** at about 15:45:
 - In FillingQA (commit `99ab817`):
   - `docs/SUPERVISOR.md` with the project's rules;
   - `supervisor_rules` and `phases` set in `bridge.toml`;
   - the contract re-approved (`DEC-003`);
   - phases 1–3 recorded as complete before the move (`DEC-004` to `DEC-006`);
-  - the next supervisor turn set to start a fresh session.
+  - the next supervisor turn set to start a fresh session, which reads
+    `docs/SUPERVISOR.md`.
 - In agent-bridge (`176085f`):
-  - the stale-reply rule;
-  - the UI's old-state toggle off by default;
-  - the supervisor-rules warnings;
+  - `--adopt-legacy` skips an unsent reply older than the last builder report;
+  - the UI's old-state toggle is off by default;
+  - `init` picks up `docs/SUPERVISOR.md`, and `check` and every run warn when a repo with
+    an old `tools/bridge.py` has no supervisor rules;
   - `approve --done`.
 
-**Not yet seen on FillingQA:** no run since 15:11.
+**Not yet seen on FillingQA,** which has not run since 15:11 (checked at 18:59):
 - A supervisor turn with `docs/SUPERVISOR.md`.
-- The builder under the sandbox. The sandbox was added later and is on by default, so the
-  next run is the first.
+- The builder under the sandbox. The sandbox was added after the run and is on by
+  default, so the next run is its first.
 - A planner turn.
 - PHASE COMPLETE, builder rotation and PROJECT COMPLETE.
-- Usage-limit sleeps and WAITs.
-- `project.verify` (not set), notifications and cost tracking (all added after the run).
-
+- Sleeps for WAITs or usage limits.
+- `decide` (the owner round in section 3).
+- `project.verify` (not set), notifications and cost tracking, all added after the run.

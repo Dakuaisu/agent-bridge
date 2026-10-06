@@ -1239,7 +1239,7 @@ silently.
 - **Install:** `uv tool install --editable ~/agent-bridge`, or `pip` under
   `/opt/homebrew/bin/python3.12`. The `python3` on PATH is 3.9.
 
-## 16. Migration plan (detail in `docs/MIGRATION.md`; not performed)
+## 16. Migration plan (detail in `docs/MIGRATION.md`; FillingQA moved on 2026-10-06, the other two have not)
 
 Per project, while its bridge is stopped:
 

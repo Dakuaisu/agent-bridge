@@ -198,10 +198,11 @@ resends the interrupted turn.
 - **Only the Claude Code builder is sandboxed.** On macOS it may write only inside the
   repo, the temp folders and the tools' own state (`safety.sandbox`). That was checked
   live with one Haiku call in a temporary repo; no real project's builder has run under
-  it yet. An opencode builder is not sandboxed (OPEN-004). There, a write outside the repo is caught
-  after the turn and pauses the run. That covers absolute paths, `~`, `$HOME`, `cd` and
-  `git -C`. A relative path that a tool resolved in another folder shows up only as "the
-  builder wrote, but the repo did not change" (INVENTORY L22, OPEN-003).
+  it yet. An opencode builder is not sandboxed (OPEN-004). There, a write outside the
+  repo is caught after the turn and pauses the run. That covers absolute paths, `~`,
+  `$HOME`, `cd` and `git -C`. A relative path that a tool resolved in another folder
+  shows up only as "the builder wrote, but the repo did not change" (INVENTORY L22,
+  OPEN-003).
 - **Commit trailers are detected, not prevented.** In the final smoke test a Haiku
   builder added `Co-Authored-By` despite the rules; the bridge logged `COMMIT
   ATTRIBUTION`. Nothing rewrites history.
@@ -211,19 +212,21 @@ resends the interrupted turn.
 - **opencode 2.x is not supported.** The flags this uses were removed there.
 - **Shared logins.** If the `claude` login expires mid-run, the bridge pauses with "run
   `claude login`". It never logs in for you.
-- **Live use so far is small.**
-  - Haiku smoke tests in temporary repos: three on Claude Code, one on opencode.
-  - One real project, FillingQA, moved on 2026-10-06 with the default Claude Code models
-    (`docs/MIGRATION.md`, section 6). Its run lasted about 8 minutes:
-    - two builder turns on `claude-opus-5-5` and one supervisor turn on
-      `claude-fable-5-1`;
-    - then you stopped it, and it has not run since.
+- **Live use is still small.**
+  - Haiku smoke tests in temporary repos: three on Claude Code (the last reached PROJECT
+    COMPLETE) and one on opencode.
+  - One real project: FillingQA moved on 2026-10-06 with the default Claude Code models
+    (`docs/MIGRATION.md`, section 6). Its first run lasted about 8 minutes (two builder
+    turns on `claude-opus-5-5`, one supervisor turn on `claude-fable-5-1`) before it was
+    stopped by hand.
   - Not yet seen on a real project: a planner turn, PHASE COMPLETE, builder rotation,
-    PROJECT COMPLETE, usage-limit sleeps, WAITs, the builder sandbox, `project.verify`,
-    notifications and cost tracking.
+    PROJECT COMPLETE, sleeps for WAITs or usage limits, `decide`, an opencode role, and
+    what was added after that run (the builder sandbox, `project.verify`, notifications,
+    cost tracking).
 - **Migration:** FillingQA has moved; xbrl-frontier and netcode-testbed have not.
 - **The terminal UI is keyboard-only.** There is no mouse support, so your terminal's own
   text selection keeps working. Inside tmux or screen with a ctrl-a prefix, press it
   twice to send ctrl-a, or use `:` → All projects.
-- **The UI was tested in a pseudo-terminal and with rendered previews,** not driven by
-  hand against a live run.
+- **The UI has been used on one real project.** Its command log shows init, check,
+  approve, run and stop on the FillingQA move. Its other commands were tested only in a
+  pseudo-terminal and with rendered previews.
