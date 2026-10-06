@@ -196,8 +196,9 @@ resends the interrupted turn.
 
 - **Read-only on opencode is by instruction only.** It is audited, not enforced.
 - **Only the Claude Code builder is sandboxed.** On macOS it may write only inside the
-  repo, the temp folders and the tools' own state (`safety.sandbox`, verified live). An
-  opencode builder is not sandboxed (OPEN-004). There, a write outside the repo is caught
+  repo, the temp folders and the tools' own state (`safety.sandbox`). That was checked
+  live with one Haiku call in a temporary repo; no real project's builder has run under
+  it yet. An opencode builder is not sandboxed (OPEN-004). There, a write outside the repo is caught
   after the turn and pauses the run. That covers absolute paths, `~`, `$HOME`, `cd` and
   `git -C`. A relative path that a tool resolved in another folder shows up only as "the
   builder wrote, but the repo did not change" (INVENTORY L22, OPEN-003).
@@ -210,10 +211,17 @@ resends the interrupted turn.
 - **opencode 2.x is not supported.** The flags this uses were removed there.
 - **Shared logins.** If the `claude` login expires mid-run, the bridge pauses with "run
   `claude login`". It never logs in for you.
-- **Live testing so far was on Haiku only,** in small temporary repos. The default
-  Fable and Opus models have not run a full loop under agent-bridge.
-- **Migration** of existing projects is documented in `docs/MIGRATION.md` and has not
-  been performed.
+- **Live use so far is small.**
+  - Haiku smoke tests in temporary repos: three on Claude Code, one on opencode.
+  - One real project, FillingQA, moved on 2026-10-06 with the default Claude Code models
+    (`docs/MIGRATION.md`, section 6). Its run lasted about 8 minutes:
+    - two builder turns on `claude-opus-5-5` and one supervisor turn on
+      `claude-fable-5-1`;
+    - then you stopped it, and it has not run since.
+  - Not yet seen on a real project: a planner turn, PHASE COMPLETE, builder rotation,
+    PROJECT COMPLETE, usage-limit sleeps, WAITs, the builder sandbox, `project.verify`,
+    notifications and cost tracking.
+- **Migration:** FillingQA has moved; xbrl-frontier and netcode-testbed have not.
 - **The terminal UI is keyboard-only.** There is no mouse support, so your terminal's own
   text selection keeps working. Inside tmux or screen with a ctrl-a prefix, press it
   twice to send ctrl-a, or use `:` → All projects.

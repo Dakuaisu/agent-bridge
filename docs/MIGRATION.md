@@ -1,7 +1,8 @@
 # Moving FillingQA, xbrl-frontier and netcode-testbed onto agent-bridge
 
-Status: written, **not performed**. Nothing in the three projects has been changed.
-Follow it per project, with that project's old bridge stopped.
+Status: FillingQA moved on 2026-10-06 (section 6 says what happened); xbrl-frontier and
+netcode-testbed have not moved. Follow this per project, with that project's old bridge
+stopped.
 
 ## 0. Before you start
 
@@ -127,7 +128,8 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
     after it completed.
   - The builder session (`ses_f08e8379…`) reached about 968k tokens per request.
 - **Fresh sessions are the better start:** run step 2 without `--adopt-legacy`. (If it is
-  adopted anyway, the stale reply is now skipped because `builder_last.md` is newer.)
+  adopted anyway, the stale reply is now skipped because `builder_last.md` is newer.) On
+  the real move it was adopted, and the stale reply was delivered (section 6).
 - **Record phases 1–3** (step 7): the README's status says they are complete, WORKLOG
   shows the Phase 1 exit accepted at `8f9faed`, the Phase 2 exit met on the dev backend,
   and the Phase 3 exit statement.
@@ -199,3 +201,69 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
    `reports/`, and any `report.md`, `owner_todo.md` or `PAUSED.md`. The ledger entries
    agent-bridge appended to `docs/TRADEOFFS.md` stay; revert them with git if you want.
 4. Revert `CLAUDE.md` with git if you applied `--write-rules`.
+
+## 6. What happened on the FillingQA move (2026-10-06)
+
+From FillingQA's `.bridge/` logs, its git history and the UI's command log. FillingQA's
+local folder is `~/FillingQA`.
+
+**The steps.** The owner moved it with the terminal UI:
+1. **Set up this repo** ran `init --write-rules --adopt-legacy` (15:01) with the default
+   engines, then `check`.
+2. `approve --no-run` (15:03:11) adopted the contract: `DEC-001` in `docs/TRADEOFFS.md`.
+3. `run --forever` (15:03:49).
+
+Steps 1, 3 and 7 of section 2 were not done then: there was no `docs/SUPERVISOR.md`,
+`phases` was unset, and no phases were recorded.
+
+**Engines and sessions.**
+- All three roles were on Claude Code with the default models: planner
+  `claude-fable-5-1` (max), supervisor `claude-fable-5-1` (xhigh), builder
+  `claude-opus-5-5`.
+- Every turn was served by the configured model.
+- The old opencode sessions were not adopted, because no role is on opencode; both roles
+  that ran started fresh sessions.
+
+**What the loop did,** 15:03 to 15:11:
+- **Exchange 0, the builder** (32 s).
+  - Its first message was the old bridge's stale unsent reply, "Noted. Wait." from
+    2026-10-03, delivered because of `--adopt-legacy`.
+  - It committed the bridge's own records as `50c46d7`: the DEC-001 entry, the
+    `CLAUDE.md` block and `bridge.toml`.
+  - It ended with `WAIT UNTIL 2026-10-07T09:00`.
+- **Exchange 1, the supervisor** (180 s, ending at 126,585 tokens of context).
+  - It found those records in the repo (it noted it could not recompute the hashes with its
+    read-only tools) and wrote `NO WAIT`.
+  - It gave one instruction: create `docs/RESULTS.md`, the results register that
+    `bridge.toml` names and the rules block requires.
+- **Exchange 1, the builder** (254 s).
+  - It committed `b609a13`: `docs/RESULTS.md` with 201 rows copied from committed run
+    files, all marked `development`, plus `DEC-002` (an autonomous decision, for the
+    owner to review).
+  - It again ended with `WAIT UNTIL 2026-10-07T09:00`.
+- **The stop.** The owner pressed stop at 15:09. The bridge stopped after that turn, at
+  15:11:37, before the supervisor reviewed the second report.
+- `review.log` holds no alerts for the run, only the contract approval.
+
+**After the check,** at 15:45:
+- In FillingQA (commit `99ab817`):
+  - `docs/SUPERVISOR.md` with the project's rules;
+  - `supervisor_rules` and `phases` set in `bridge.toml`;
+  - the contract re-approved (`DEC-003`);
+  - phases 1–3 recorded as complete before the move (`DEC-004` to `DEC-006`);
+  - the next supervisor turn set to start a fresh session.
+- In agent-bridge (`176085f`):
+  - the stale-reply rule;
+  - the UI's old-state toggle off by default;
+  - the supervisor-rules warnings;
+  - `approve --done`.
+
+**Not yet seen on FillingQA:** no run since 15:11.
+- A supervisor turn with `docs/SUPERVISOR.md`.
+- The builder under the sandbox. The sandbox was added later and is on by default, so the
+  next run is the first.
+- A planner turn.
+- PHASE COMPLETE, builder rotation and PROJECT COMPLETE.
+- Usage-limit sleeps and WAITs.
+- `project.verify` (not set), notifications and cost tracking (all added after the run).
+
