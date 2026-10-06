@@ -111,10 +111,10 @@ def test_error_results_are_classified(setup, message: str, error: type) -> None:
     with pytest.raises(error) as info:
         send(make("supervisor"))
     if error is SessionLimit:
-        from zoneinfo import ZoneInfo
+        from agent_bridge.clock import IST
 
         assert info.value.reset_at is not None
-        assert info.value.reset_at.astimezone(ZoneInfo("Asia/Calcutta")).strftime("%H:%M") == "21:40"
+        assert info.value.reset_at.astimezone(IST).strftime("%H:%M") == "21:40"
 
 
 def test_unknown_flag_is_unsupported(setup) -> None:
