@@ -28,9 +28,61 @@ python3.12 -m venv .venv
 .venv/bin/agent-bridge --version
 ```
 
+To run it from any folder, link it onto your PATH (here `~/.local/bin`):
+
+```
+ln -s ~/agent-bridge/.venv/bin/agent-bridge ~/.local/bin/agent-bridge
+```
+
 Development: `.venv/bin/pip install -e '.[dev]'`, then `.venv/bin/python -m pytest`.
 
-## Quick start
+## Run it: one command
+
+```
+agent-bridge
+```
+
+In a terminal, that opens the terminal UI on the current folder's project:
+
+- **No project here yet.** A start screen offers **New project**: the planner interviews
+  you, drafts the plan, and the agents build it. For a repo that already has
+  `docs/PRD.md` and `CLAUDE.md`, it offers **Set up this repo** (init, check, adopt).
+- **A project.** The dashboard shows:
+  - the three agents: engine, model, how read-only is enforced, what each is doing right
+    now, and how full its context is;
+  - the live stream of the run;
+  - what waits for you, the phases, and the alerts.
+
+  The line above the stream always says what to do next.
+- **ctrl-a** lists every project agent-bridge has opened on this machine, with its state.
+  Enter opens one.
+
+| Key | Action |
+|---|---|
+| `r` | run, or resume, the loop |
+| `s` | stop, after the current step or now |
+| `m` | message the agents, verbatim, as `[owner]` |
+| `i` | answer the planner's questions |
+| `a` | approve the plan, a plan change, or the contract |
+| `v` | read the plan files; `e` edits them in `$EDITOR` |
+| `d` | apply an owner decisions doc |
+| `o` | owner to-do |
+| `p` | report |
+| `l` | logs |
+| `:` | every command |
+| `?` | help |
+| `q` | quit |
+
+Quitting the UI never stops the bridge. Each action runs an `agent-bridge` command in
+the background, and its output is kept under `~/.local/state/agent-bridge/ui/`. Run
+`agent-bridge` again to come back. `agent-bridge ui --all` opens on the project list.
+
+The UI needs a terminal of at least 60×16 and looks best with 256 colours. Set
+`AGENT_BRIDGE_NO_SPLASH=1` to skip the start animation.
+
+## Without the UI
+
+Every UI action is also a subcommand, for scripts and for terminals without the UI.
 
 ### A new project
 
@@ -129,3 +181,8 @@ left off.
   Fable and Opus models have not run a full loop under agent-bridge.
 - **Migration** of existing projects is documented in `docs/MIGRATION.md` and has not
   been performed.
+- **The terminal UI is keyboard-only.** There is no mouse support, so your terminal's own
+  text selection keeps working. Inside tmux or screen with a ctrl-a prefix, press it
+  twice to send ctrl-a, or use `:` → All projects.
+- **The UI was tested in a pseudo-terminal and with rendered previews,** not driven by
+  hand against a live run.

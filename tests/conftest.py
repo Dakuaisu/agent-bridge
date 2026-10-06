@@ -18,6 +18,14 @@ def isolated_git(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.M
     monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-10-06T12:00:00+05:30")
 
 
+@pytest.fixture(autouse=True)
+def isolated_state_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The project registry and neutral role folders live under XDG_STATE_HOME; never the owner's."""
+    state = tmp_path_factory.mktemp("state")
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    return state
+
+
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
         ["git", *args], cwd=repo, check=True, capture_output=True, text=True

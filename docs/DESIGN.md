@@ -1051,6 +1051,7 @@ Every command takes `--repo PATH` (default: the cwd's git root) and `--config PA
 | `review [--template PATH]` | The owner to-do: `AUTONOMOUS DECISION` and `AWAITING OWNER` ledger entries, OWNER-BLOCKED items (headings, table rows and status lines; RESOLVED skipped; all three projects' formats), and waiting plan changes. Writes `.bridge/owner_todo.md` and prints it. `--template` writes an `OWNER_REVIEW.md` skeleton (D1..Dn and "Done when"). |
 | `report [--out PATH]` | Write the owner-review report now (6.10). It is also written automatically at PROJECT COMPLETE. |
 | `logs [-f] [--transcript \| --review \| --console \| --serve \| --events] [-n N]` | Default: rendered events. `-f` follows. |
+| `ui [--all]` | The terminal UI (section 18). `agent-bridge` with no arguments opens it when stdin and stdout are terminals, and prints the help otherwise. |
 | `check` | Config; binaries and versions; `autoupdate`; auth (`claude auth status`); the server port; read-only per role; git identity; `.gitignore`; `AGENTS.md`; contract hashes and drift; the configured docs. No model calls. |
 
 `status [--json]` shows:
@@ -1223,3 +1224,45 @@ Small commits, each with its tests:
      2026-10-06, see 4.3); without one they are skipped and noted;
    - the report says whether opencode lost its login.
 10. `docs/MIGRATION.md` and the README.
+
+## 18. Terminal UI
+
+Added 2026-10-06 at the owner's request (DEC-017): one command, `agent-bridge`, opens a
+full-screen terminal UI. It uses only `curses` from the standard library.
+
+- **Scope.** It opens on the current folder's project. ctrl-a lists every project in the
+  registry, `$XDG_STATE_HOME/agent-bridge/projects.json`; any command that loads a project
+  records it there. Everything the CLI does is reachable:
+  - new project and the planner's interview;
+  - init and adopt;
+  - run, stop, message, approve (plan, plan changes, re-approval), decide;
+  - fresh sessions, check, report, logs.
+- **It reads and launches; it never drives the engine.** The view reads `.bridge/`:
+  - `state.json` and `review.log` are re-read when their mtime changes;
+  - `events.jsonl` is tailed from a byte offset;
+  - the lock tells it whether a bridge is running.
+
+  Every action runs an `agent-bridge` subcommand as a detached process (new session,
+  output under `$XDG_STATE_HOME/agent-bridge/ui/`), and its result becomes a toast.
+  Closing the UI never stops a run, and the CLI stays the single implementation of every
+  action (DEC-018).
+- **Layout.**
+  - A header with the state chip.
+  - Three role pods: engine and model, read-only enforcement, activity, context gauge.
+  - A signal line that shows which way the current message travels.
+  - The next-step line.
+  - The event stream.
+  - Owner, phases and alerts cards.
+  - Contextual keycaps.
+
+  Forms, confirmations, a tabbed document viewer (search, `$EDITOR`), a command palette
+  and pick lists are overlays.
+- **Drawing.** Screens draw into an off-screen canvas that understands wide characters.
+  Only changed rows are copied to curses. The canvas also renders to HTML, which
+  `scripts/tui_preview.py` uses for previews without a terminal.
+- **Tests.**
+  - Units for text width, the canvas, editing and the watcher.
+  - Every action against the exact CLI argv it launches.
+  - Rendering at sizes from 150×42 down to the 60×16 minimum.
+  - A run of the real curses app in a pseudo-terminal.
+

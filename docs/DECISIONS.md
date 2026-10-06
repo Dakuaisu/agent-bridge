@@ -206,3 +206,32 @@ DESIGN v3 section 16 migrated state with `pin`. Three additions:
   --resume`. A stored session now resumes only on the engine that created it.
 
 DESIGN sections 11 and 16 are updated.
+
+## DEC-017 A terminal UI as the one entry point
+- Decided by: owner (2026-10-06, in conversation)
+- Status: OWNER DECISION
+
+The owner chose:
+- a terminal UI (curses, no new dependencies) over a browser app or a native window;
+- `agent-bridge` opens the current folder's project, and ctrl-a shows all projects;
+- the UI can do everything the CLI does;
+- `agent-bridge` is linked onto the PATH (`~/.local/bin/agent-bridge`).
+
+## DEC-018 How the terminal UI is built
+- Decided by: build agent (2026-10-06)
+- Status: AUTONOMOUS DECISION - owner to review
+
+- **Actions are CLI commands.** Each one runs an `agent-bridge` subcommand in a detached
+  process, instead of calling the engine inside the UI process.
+  - The CLI stays the one tested implementation.
+  - A run outlives the UI.
+  - A failure shows as the command's own last output line.
+
+  Cost: one Python start per action, about a second.
+- **The project list is a registry** that the CLI writes on every command. Scanning the
+  disk for `.bridge/` folders would be slow and would find folders that are not
+  projects.
+- **No mouse support**, so the terminal's own text selection keeps working.
+- **Text for the CLI goes through `@file`** (messages, answers, kickoffs, ideas). The
+  files stay under `~/.local/state/agent-bridge/ui/` (the newest 200), so what was sent is
+  on record.

@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_bridge import __version__, contract, owner, runtime
+from agent_bridge import __version__, contract, owner, registry, runtime
 from agent_bridge.backends.claude_code import neutral_dir
 from agent_bridge.clock import RealClock, iso
 from agent_bridge.config import CONFIG_NAME, ENGINES, ROLES, ConfigError, load_config, render_config_template
@@ -67,6 +67,7 @@ def pick_port(start: int = 4100, end: int = 4200) -> int:
 def load_project(a: argparse.Namespace) -> tuple[Path, Any, StateDir]:
     repo = runtime.find_repo(a.repo)
     cfg = load_config(runtime.config_path(repo, a.config))
+    registry.remember(cfg.project.repo, cfg.project.name)
     return cfg.project.repo, cfg, StateDir(cfg.project.repo)
 
 
@@ -171,6 +172,7 @@ def cmd_init(a: argparse.Namespace) -> int:
     )
     atomic_write_text(path, text)
     cfg = load_config(path)
+    registry.remember(cfg.project.repo, cfg.project.name)
     print(f"wrote {path}")
     for label, p in (("PRD", cfg.project.prd), ("rules", cfg.project.rules[0]), ("ledger", cfg.project.decisions), ("open items", cfg.project.open_items)):
         print(f"  {label:<11} {p.relative_to(repo)}: {'found' if p.exists() else 'missing'}")
@@ -214,6 +216,7 @@ def cmd_new(a: argparse.Namespace) -> int:
     port = a.port or (pick_port() if any(e == "opencode" for e, _ in roles.values()) else None)
     atomic_write_text(path, render_config_template(name=a.name or repo.name, created=f"{now():%Y-%m-%d %H:%M}", roles=roles, opencode_port=port))
     cfg = load_config(path)
+    registry.remember(cfg.project.repo, cfg.project.name)
     sd = StateDir(repo)
     contract.ensure_gitignore(repo, (".bridge/", ".omo/") if cfg.uses_opencode() else (".bridge/",))
     idea = read_text_arg(a.idea)
@@ -543,6 +546,14 @@ def cmd_report(a: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_ui(a: argparse.Namespace) -> int:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise runtime.UsageError("the UI needs a terminal; scripts use the subcommands (`agent-bridge --help`)")
+    from agent_bridge.tui.app import run_tui
+
+    return run_tui(a.repo, show_all=a.all)
+
+
 def cmd_logs(a: argparse.Namespace) -> int:
     _, _, sd = load_project(a)
     target = {"transcript": sd.loop_log, "review": sd.review_log, "console": sd.console_log, "serve": sd.serve_log, "events": sd.events}
@@ -630,7 +641,9 @@ def cmd_check(a: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agent-bridge", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="agent-bridge", description=__doc__, epilog="With no arguments in a terminal, agent-bridge opens its terminal UI."
+    )
     parser.add_argument("--version", action="version", version=f"agent-bridge {__version__}")
     sub = parser.add_subparsers(dest="command")
 
@@ -716,6 +729,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(f"--{name}", action="store_true")
 
     command("check", cmd_check, "check the setup without any model call")
+
+    p = command("ui", cmd_ui, "the terminal UI; `agent-bridge` with no arguments opens it too")
+    p.add_argument("--all", action="store_true", help="start on the list of all projects (ctrl-a)")
     return parser
 
 
@@ -724,6 +740,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     args._argv = list(argv) if argv is not None else None
     if not getattr(args, "command", None):
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            from agent_bridge.tui.app import run_tui
+
+            return run_tui(None)
         parser.print_help()
         return EXIT_OK
     try:
