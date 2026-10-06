@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
+from agent_bridge import limits
 from agent_bridge.clock import IST
 from agent_bridge.limits import classify, parse_reset
 
@@ -83,3 +86,31 @@ def test_no_reset_in_text() -> None:
 )
 def test_classify(text: str, kind: str) -> None:
     assert classify(text) == kind
+
+
+def _without_backward_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tz database without the 'backward' links (some minimal Linux images): legacy names are missing."""
+    real = limits.ZoneInfo
+    missing = {"Asia/Calcutta", "US/Pacific", "Europe/Kiev"}
+
+    def zone(name: str):
+        if name in missing:
+            raise ZoneInfoNotFoundError(f"No time zone found with key {name}")
+        return real(name)
+
+    monkeypatch.setattr(limits, "ZoneInfo", zone)
+
+
+def test_a_legacy_zone_name_parses_without_the_backward_links(monkeypatch: pytest.MonkeyPatch) -> None:
+    _without_backward_links(monkeypatch)
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=IST)
+    assert parse_reset("You've hit your session limit · resets 9:40pm (Asia/Calcutta)", now) == datetime(2026, 10, 6, 21, 40, tzinfo=IST)
+    pacific = parse_reset("limit reached · resets 6am (US/Pacific)", now)
+    assert pacific is not None and pacific.astimezone(ZoneInfo("America/Los_Angeles")).hour == 6
+
+
+def test_an_unknown_zone_is_logged_not_silent(caplog: pytest.LogCaptureFixture) -> None:
+    now = datetime(2026, 10, 6, 20, 0, tzinfo=IST)
+    with caplog.at_level(logging.WARNING, logger="agent_bridge.limits"):
+        assert parse_reset("You've hit your session limit · resets 9:40pm (Mars/Olympus_Mons)", now) is None
+    assert "Mars/Olympus_Mons" in caplog.text

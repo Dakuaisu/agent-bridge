@@ -6,9 +6,82 @@ account-pool plugin's serve.log lines, and opencode's retry status messages.
 
 from __future__ import annotations
 
+import logging
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+log = logging.getLogger(__name__)
+
+# Legacy names that the tz database keeps only as "backward" links. Claude Code prints some of them
+# ("Asia/Calcutta"); a system whose tz data lacks the backward file knows only the canonical name. Each pair
+# was checked against a full tz database: both names hold byte-identical data.
+LEGACY_ZONES = {
+    "Asia/Calcutta": "Asia/Kolkata",
+    "Asia/Katmandu": "Asia/Kathmandu",
+    "Asia/Saigon": "Asia/Ho_Chi_Minh",
+    "Asia/Rangoon": "Asia/Yangon",
+    "Asia/Dacca": "Asia/Dhaka",
+    "Asia/Thimbu": "Asia/Thimphu",
+    "Asia/Ujung_Pandang": "Asia/Makassar",
+    "Asia/Ulan_Bator": "Asia/Ulaanbaatar",
+    "Asia/Chongqing": "Asia/Shanghai",
+    "Asia/Chungking": "Asia/Shanghai",
+    "Asia/Harbin": "Asia/Shanghai",
+    "Asia/Tel_Aviv": "Asia/Jerusalem",
+    "Asia/Istanbul": "Europe/Istanbul",
+    "Asia/Macao": "Asia/Macau",
+    "Asia/Ashkhabad": "Asia/Ashgabat",
+    "Europe/Kiev": "Europe/Kyiv",
+    "Europe/Belfast": "Europe/London",
+    "Atlantic/Faeroe": "Atlantic/Faroe",
+    "America/Buenos_Aires": "America/Argentina/Buenos_Aires",
+    "America/Indianapolis": "America/Indiana/Indianapolis",
+    "America/Louisville": "America/Kentucky/Louisville",
+    "America/Godthab": "America/Nuuk",
+    "Pacific/Truk": "Pacific/Chuuk",
+    "Pacific/Ponape": "Pacific/Pohnpei",
+    "Pacific/Samoa": "Pacific/Pago_Pago",
+    "Australia/ACT": "Australia/Sydney",
+    "Australia/NSW": "Australia/Sydney",
+    "Australia/Canberra": "Australia/Sydney",
+    "Australia/Victoria": "Australia/Melbourne",
+    "Australia/Queensland": "Australia/Brisbane",
+    "Australia/West": "Australia/Perth",
+    "US/Eastern": "America/New_York",
+    "US/Central": "America/Chicago",
+    "US/Mountain": "America/Denver",
+    "US/Pacific": "America/Los_Angeles",
+    "US/Alaska": "America/Anchorage",
+    "US/Hawaii": "Pacific/Honolulu",
+    "US/Arizona": "America/Phoenix",
+    "Canada/Eastern": "America/Toronto",
+    "Canada/Central": "America/Winnipeg",
+    "Canada/Mountain": "America/Edmonton",
+    "Canada/Pacific": "America/Vancouver",
+    "Brazil/East": "America/Sao_Paulo",
+    "Mexico/General": "America/Mexico_City",
+    "Japan": "Asia/Tokyo",
+    "Singapore": "Asia/Singapore",
+    "Hongkong": "Asia/Hong_Kong",
+    "PRC": "Asia/Shanghai",
+    "ROK": "Asia/Seoul",
+    "ROC": "Asia/Taipei",
+    "Israel": "Asia/Jerusalem",
+    "Iran": "Asia/Tehran",
+    "Turkey": "Europe/Istanbul",
+    "Egypt": "Africa/Cairo",
+    "GB": "Europe/London",
+    "Eire": "Europe/Dublin",
+    "Poland": "Europe/Warsaw",
+    "Portugal": "Europe/Lisbon",
+    "NZ": "Pacific/Auckland",
+    "UCT": "Etc/UTC",
+    "Universal": "Etc/UTC",
+    "Zulu": "Etc/UTC",
+    "Greenwich": "Etc/GMT",
+    "GMT0": "Etc/GMT",
+}
 
 AUTH_PATTERNS = [
     r"failed to authenticate",
@@ -95,10 +168,24 @@ def parse_reset(text: str, now: datetime) -> datetime | None:
     return None
 
 
+def _zone(name: str) -> ZoneInfo | None:
+    """The zone a limit message names: a legacy alias's canonical name first, then the name as printed."""
+    for candidate in dict.fromkeys(n for n in (LEGACY_ZONES.get(name), name) if n):
+        try:
+            return ZoneInfo(candidate)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+    log.warning(
+        "a usage-limit message names the time zone %r, which this system does not know; its reset time is ignored "
+        "and the run backs off instead",
+        name,
+    )
+    return None
+
+
 def _clock_reset(m: re.Match[str], now: datetime) -> datetime | None:
-    try:
-        tz = ZoneInfo(m.group("tz"))
-    except (ZoneInfoNotFoundError, ValueError):
+    tz = _zone(m.group("tz"))
+    if tz is None:
         return None
     hour = int(m.group("h"))
     minute = int(m.group("m") or 0)
