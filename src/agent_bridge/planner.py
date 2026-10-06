@@ -404,6 +404,43 @@ class ContractEngine(Engine):
         self.j.event("contract_approved", by=by, hashes=hashes)
         return notes
 
+    def record_done(self, names: list[str], *, reason: str = "") -> list[str]:
+        """Phases the owner says were complete before agent-bridge; recorded as the owner's word, not verified."""
+        if self.st.contract is None:
+            raise PlanError("there is no approved contract yet: adopt it with `agent-bridge approve` first")
+        titles = [h.title for h in contract.headings(_read(self.cfg.project.prd)) if contract.phase_token(h.title)]
+        by_token = {contract.phase_token(t): t for t in titles}
+        done = {contract.phase_token(d["phase"]) or str(d["phase"]).lower() for d in self.st.phases_done}
+        wanted = []
+        for name in names:
+            token = contract.phase_token(name) or contract.phase_token(f"Phase {name}")
+            if token not in by_token:
+                raise PlanError(f"{name!r} is not a phase heading in {self.rel(self.cfg.project.prd)} (found: {', '.join(titles) or 'none'})")
+            wanted.append(token)
+        notes = []
+        when = iso(self.now())
+        for token in dict.fromkeys(wanted):
+            title = re.sub(r"[*_`]+", "", by_token[token]).strip()
+            if token in done:
+                notes.append(f"{title}: already recorded as complete")
+                continue
+            evidence = f"\n\nEvidence given by the owner: {reason.strip()}" if reason.strip() else ""
+            dec, _ = contract.append_decision(
+                self.cfg.project.decisions,
+                title=f"{title} complete before agent-bridge",
+                decided_by="owner",
+                status="OWNER DECISION (agent-bridge approve --done)",
+                body=f"Recorded by agent-bridge at {when}. The owner states this phase was complete before the project moved "
+                f"to agent-bridge; the supervisor has not verified it under agent-bridge.{evidence}",
+            )
+            self.st.phases_done.append({"phase": title, "exchange": self.st.exchange, "at": when, "by": "owner", "dec": dec})
+            done.add(token)
+            self.j.review(f"PHASE RECORDED AS COMPLETE: {title} (owner, {dec})")
+            self.j.event("phase_recorded", phase=title, dec=dec)
+            notes.append(f"recorded {title} as complete ({dec} in {self.rel(self.cfg.project.decisions)})")
+        self.save()
+        return notes
+
     def reapprove_contract(self) -> list[str]:
         changed = contract.drifted(self.cfg, (self.st.contract or {}).get("hashes", {}))
         self.cfg = load_config(self.cfg.path)

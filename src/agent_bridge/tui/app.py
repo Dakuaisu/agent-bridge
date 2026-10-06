@@ -17,9 +17,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from agent_bridge import registry
+from agent_bridge import contract, registry
 from agent_bridge.config import ENGINES, ROLES
 from agent_bridge.live import render_event
+from agent_bridge.protocol import display_token
 from agent_bridge.tui import draw as D
 from agent_bridge.tui import theme as T
 from agent_bridge.tui.canvas import Canvas
@@ -890,7 +891,18 @@ class App:
         root = self.repo
         preset, custom = self.engine_fields()
         rules = ToggleField("Append the agent-bridge rules block to CLAUDE.md (labels, WAIT, the contract, commits)", True)
-        legacy = ToggleField("Adopt the old tools/bridge.py sessions and pending state", True, when=lambda: self.snap.legacy)
+        legacy = ToggleField(
+            "Also adopt the old bridge's state: its opencode sessions, and its unsent reply or last builder report. "
+            "Leave off for a fresh start (docs/MIGRATION.md says which projects want it).",
+            False,
+            when=lambda: self.snap.legacy,
+        )
+        old_rules = NoteField(
+            "This repo has an old tools/bridge.py. Its project rules for the supervisor live in that script's SYSTEM and "
+            "AUTONOMOUS prompts: copy the project parts into docs/SUPERVISOR.md first, and init will use it.",
+            T.WARN,
+            when=lambda: (root / "tools" / "bridge.py").exists() and not (root / "docs" / "SUPERVISOR.md").exists(),
+        )
         note = NoteField("Writes bridge.toml (never overwrites one) and adds .bridge/ to .gitignore. Then a setup check runs. No model calls.", T.FAINT)
 
         def go(form: Form, app: App) -> None:
@@ -910,7 +922,39 @@ class App:
             app.close(form)
             app.launch("init", argv, cwd=root, then=after)
 
-        self.push(Form("SET UP THIS REPO", [preset, *custom.values(), rules, legacy, note], [Button("Set up", go), Button("Cancel", lambda f, a: a.close(f))], width=96, accent=87))
+        self.push(Form("SET UP THIS REPO", [preset, *custom.values(), rules, legacy, old_rules, note], [Button("Set up", go), Button("Cancel", lambda f, a: a.close(f))], width=96, accent=87))
+
+    def why_phases(self) -> str | None:
+        if self.why_config():
+            return self.why_config()
+        if self.snap.state.contract is None:
+            return "approve a contract first"
+        if self.snap.holder:
+            return "stop the bridge first"
+        if not any(status != "done" for _, status in self.snap.phases):
+            return "no open Phase headings in the PRD"
+        return self.why_busy()
+
+    def act_phases(self) -> None:
+        if not self.guard(self.why_phases):
+            return
+        open_phases = [(title, contract.phase_token(title)) for title, status in self.snap.phases if status != "done"]
+        toggles = [ToggleField(title) for title, _ in open_phases]
+        evidence = LineField("Evidence", placeholder="where it was verified: a commit, a WORKLOG entry, the README")
+        note = NoteField("For phases finished before this project moved to agent-bridge. Each is recorded in the ledger as your word, not as verified by the supervisor.", T.FAINT)
+
+        def go(form: Form, app: App) -> None:
+            chosen = [display_token(token) for (_, token), t in zip(open_phases, toggles) if t.value and token]
+            if not chosen:
+                form.error = "tick at least one phase"
+                return
+            argv = ["approve", *[x for name in chosen for x in ("--done", name)], "--repo", str(self.repo)]
+            if evidence.value.strip():
+                argv[-2:-2] = ["--reason", evidence.value.strip()]
+            app.close(form)
+            app.launch("record phases", argv)
+
+        self.push(Form("PHASES ALREADY COMPLETE", [note, *toggles, evidence], [Button("Record", go), Button("Cancel", lambda f, a: a.close(f))], width=96, accent=84))
 
     def after_check(self, job: Job) -> str | None:
         actions = []
@@ -950,6 +994,7 @@ class App:
             Command("Owner-review report", "p", lambda a: a.act_report(), self.why_config, "report"),
             Command("Logs", "l", lambda a: a.act_logs(), self.why_config, "transcript console events alerts"),
             Command("Check the setup (no model calls)", "c", lambda a: a.act_check(), self.why_config, "check doctor"),
+            Command("Record phases finished before agent-bridge", "", lambda a: a.act_phases(), self.why_phases, "phase done migration"),
             Command("Fresh builder session", "", lambda a: a.act_fresh("builder"), self.why_fresh, "pin rotate"),
             Command("Fresh supervisor session", "", lambda a: a.act_fresh("supervisor"), self.why_fresh, "pin rotate"),
             Command("Fresh planner session", "", lambda a: a.act_fresh("planner"), self.why_fresh, "pin rotate"),

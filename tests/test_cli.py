@@ -253,3 +253,87 @@ def test_approve_refuses_while_planning_is_unfinished(tmp_path: Path, fakes: Fak
     assert run("approve", "--repo", str(project)) == 2
     assert "the planner has not finished (INTERVIEW)" in capsys.readouterr().err
     assert State.load(project / ".bridge/state.json").contract is None
+
+
+def test_legacy_import_skips_an_unsent_reply_the_old_bridge_ran_past(repo: Path, fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    import os
+
+    (repo / "CLAUDE.md").write_text(RULES)
+    legacy = repo / ".bridge"
+    legacy.mkdir()
+    (legacy / "unsent_reply.md").write_text("Noted. Wait.")
+    (legacy / "builder_last.md").write_text("Phase 5 built up to the owner-blocked items.")
+    os.utime(legacy / "unsent_reply.md", (1_000_000, 1_000_000))
+    assert run("init", "--repo", str(repo), "--adopt-legacy") == 0
+    out = capsys.readouterr().out
+    assert "older than builder_last.md" in out and "not delivered" in out
+    st = State.load(legacy / "state.json")
+    assert st.pending is None and st.phase == "SUPERVISOR_TURN"
+
+
+def test_legacy_import_delivers_an_unsent_reply_newer_than_the_last_report(tmp_path: Path, fakes: Fakes) -> None:
+    import os
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    legacy = repo / ".bridge"
+    legacy.mkdir()
+    (legacy / "builder_last.md").write_text("old report")
+    os.utime(legacy / "builder_last.md", (1_000_000, 1_000_000))
+    (legacy / "unsent_reply.md").write_text("Run the eval next.")
+    assert run("init", "--repo", str(repo), "--adopt-legacy") == 0
+    st = State.load(legacy / "state.json")
+    assert st.phase == "BUILDER_TURN" and st.pending["supervisor"] == "Run the eval next."
+
+
+def test_init_uses_supervisor_rules_and_check_warns_when_legacy_rules_are_missing(repo: Path, fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    contract_files(repo)
+    (repo / "tools").mkdir()
+    (repo / "tools/bridge.py").write_text("SYSTEM = 'old rules'\n")
+    assert run("init", "--repo", str(repo)) == 0
+    assert "legacy: the old tools/bridge.py kept project rules" in capsys.readouterr().out
+    assert load_config(repo / "bridge.toml").project.supervisor_rules is None
+    assert run("check", "--repo", str(repo)) == 0
+    assert "no project.supervisor_rules" in capsys.readouterr().out
+
+    (repo / "bridge.toml").unlink()
+    (repo / "docs/SUPERVISOR.md").write_text("Hand-written eval items are the owner's.\n")
+    assert run("init", "--repo", str(repo)) == 0
+    assert "supervisor  docs/SUPERVISOR.md: found" in capsys.readouterr().out
+    assert load_config(repo / "bridge.toml").project.supervisor_rules == repo / "docs/SUPERVISOR.md"
+    assert run("check", "--repo", str(repo)) == 0
+    assert "supervisor_rules" not in capsys.readouterr().out
+
+    (repo / "docs/SUPERVISOR.md").unlink()
+    assert run("check", "--repo", str(repo)) == 0
+    assert "does not exist; the supervisor runs without project rules" in capsys.readouterr().out
+
+
+def test_approve_done_records_phases_finished_before_agent_bridge(repo: Path, fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
+    from agent_bridge.statedir import BridgeLock
+
+    contract_files(repo)
+    (repo / "bridge.toml").write_text("version = 1\n[project]\nname = 'demo'\n[safety]\ncaffeinate = false\n")
+    assert run("approve", "--done", "1", "--repo", str(repo)) == 2
+    assert "no approved contract" in capsys.readouterr().err
+    assert run("approve", "--no-run", "--repo", str(repo)) == 0
+    assert run("approve", "--done", "7", "--repo", str(repo)) == 2
+    assert "'7' is not a phase heading" in capsys.readouterr().err
+    assert run("approve", "--done", "1", "--done", "Phase 1", "--reason", "WORKLOG: exit accepted at abc1234", "--repo", str(repo)) == 0
+    assert "recorded Phase 1 - Parser as complete (DEC-011" in capsys.readouterr().out
+    ledger = (repo / "docs/DECISIONS.md").read_text()
+    assert "## DEC-011 Phase 1 - Parser complete before agent-bridge" in ledger
+    assert "- Status: OWNER DECISION (agent-bridge approve --done)" in ledger and "Evidence given by the owner: WORKLOG: exit accepted at abc1234" in ledger
+    st = State.load(repo / ".bridge/state.json")
+    assert [(d["phase"], d["by"]) for d in st.phases_done] == [("Phase 1 - Parser", "owner")]
+    assert run("approve", "--done", "Phase 1 - Parser", "--repo", str(repo)) == 0
+    assert "already recorded" in capsys.readouterr().out and len(State.load(repo / ".bridge/state.json").phases_done) == 1
+    assert "PHASE RECORDED AS COMPLETE: Phase 1 - Parser" in (repo / ".bridge/review.log").read_text()
+    lock = BridgeLock(repo / ".bridge/lock")
+    lock.acquire({"argv": ["run"]})
+    try:
+        assert run("approve", "--done", "2", "--repo", str(repo)) == 2
+        assert "stop it before recording phases" in capsys.readouterr().err
+    finally:
+        lock.release()

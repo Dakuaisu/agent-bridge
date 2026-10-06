@@ -235,3 +235,29 @@ The owner chose:
 - **Text for the CLI goes through `@file`** (messages, answers, kickoffs, ideas). The
   files stay under `~/.local/state/agent-bridge/ui/` (the newest 200), so what was sent is
   on record.
+
+## DEC-019 Migration fixes found on the FillingQA move
+- Decided by: build agent (2026-10-06, at the owner's request)
+- Status: AUTONOMOUS DECISION - owner to review
+
+The owner migrated FillingQA with the terminal UI. The check found four gaps:
+- **A stale unsent reply was delivered.** The old bridge's "Noted. Wait." from 10-03
+  02:40 became the first builder message, and the builder planned to wait until the next
+  morning.
+  - `--adopt-legacy` now skips an `unsent_reply.md` that is older than `builder_last.md`:
+    the old bridge ran past it.
+  - The UI's old-state toggle is now off by default.
+- **The project's supervisor rules were never set up.** `check` and every run now warn
+  when a repo with an old `tools/bridge.py` has no `supervisor_rules`, or when that file
+  is missing. `init` sets `supervisor_rules` when `docs/SUPERVISOR.md` exists, and the UI
+  setup form says to create it first.
+- **Phases finished before the migration were unknown,** so the bridge took Phase 1 as
+  current. `approve --done PHASE` records them.
+  - Options: let the supervisor re-verify old phases (each PHASE COMPLETE rotates the
+    builder, and the old exits are not re-runnable cheaply); edit `state.json` by hand;
+    an owner record (chosen).
+  - Each record is an OWNER DECISION ledger entry, worded as the owner's word and never
+    as verified. It is refused while a bridge runs.
+- **The results register surprise** is documented in MIGRATION.md, not changed. The
+  supervisor's reading, that numbers already published need rows, is a fair reading of
+  the contract.

@@ -18,7 +18,7 @@ Follow it per project, with that project's old bridge stopped.
 | `session` | the builder session in `.bridge/state.json` (`init --adopt-legacy`, or `pin --builder ID`) |
 | `supervisor_session` | the supervisor session. agent-bridge sends it the new role text once (labels, SCOPE, WAIT, REPLAN), because the protocol changed |
 | `builder_last.md` | same name, same meaning. `--adopt-legacy` makes it the next report the supervisor reviews |
-| `unsent_reply.md` | `--adopt-legacy` makes it the next builder message, labelled `[supervisor] (saved by the old bridge when it stopped)`. New unsent messages use the same file |
+| `unsent_reply.md` | `--adopt-legacy` makes it the next builder message, labelled `[supervisor] (saved by the old bridge when it stopped)`, unless `builder_last.md` is newer: then the old bridge ran past it and it is skipped. New unsent messages use the same file |
 | `loop.log`, `review.log`, `console.log`, `serve.log` | kept and appended to. `loop.log` now records every message exactly as delivered, labels included; `review.log` keeps the `=== … ===` format |
 | `STOP` | same meaning; written by `agent-bridge stop` and cleared by the next run |
 | `kickoff*.md`, `resume.md`, `continue_kickoff.md`, `max_generator.md` | not read; keep them for history. Reuse one with `run --kickoff @.bridge/kickoff.md` |
@@ -51,7 +51,15 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
 
 ## 2. Steps for every project
 
-1. Write the config. The flags below keep today's engines; the planner is new and runs
+The terminal UI does the same with **Set up this repo** (run `agent-bridge` in the repo):
+init, then check, then `a` to adopt. Its old-state toggle is off by default, and it warns
+until `docs/SUPERVISOR.md` exists. Steps 1, 3 and 7 below still need you.
+
+1. Create `docs/SUPERVISOR.md` from the line ranges in section 1. Do this first: `init`
+   then sets `supervisor_rules` itself, and `check` and every run warn while a repo with
+   an old `tools/bridge.py` has none.
+
+2. Write the config. The flags below keep today's engines; the planner is new and runs
    on Claude Code.
 
    ```
@@ -69,15 +77,13 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
    - The opencode roles keep the old models with no variant, as the old bridges ran
      them; the default effort only goes with the default model (DEC-015).
 
-2. Edit `bridge.toml`, `[project]`:
+3. Edit `bridge.toml`, `[project]`:
    - uncomment `phases`: `"PRD section 14"` for FillingQA, `"PRD section 9"` for the
      other two;
-   - uncomment `supervisor_rules = "docs/SUPERVISOR.md"`;
+   - check that `supervisor_rules = "docs/SUPERVISOR.md"` is set;
    - for xbrl-frontier, `env_file = ".env"`. With the builder on opencode, the one
      opencode server gets these variables, so the opencode supervisor's tools can see
      them too, as with the old bridge.
-
-3. Create `docs/SUPERVISOR.md` from the line ranges in section 1.
 
 4. Optional: an enforced read-only supervisor. Change `[supervisor]` to
    `engine = "claude-code"` and `model = "claude-fable-5-1"`. The supervisor then starts a
@@ -98,7 +104,19 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
      PRD has (Goals, Non-goals, Requirements with R-ids, Results, exit-criteria lists).
      `approve` prints these as warnings and adopts anyway.
 
-7. Start the project as described in section 3.
+7. Record the phases finished before the migration. The bridge cannot know them, so
+   without this it treats Phase 1 as current. Use `agent-bridge approve --done 1 --done 2
+   --reason "<where it was verified>"` (UI: `:` → Record phases finished before
+   agent-bridge). Each phase gets an OWNER DECISION entry in the ledger. Only `Phase N`
+   headings count, so this applies to FillingQA, whose phases are headings, and not to
+   the table-based plans of the other two.
+
+8. Start the project as described in section 3.
+
+Changing `bridge.toml`, `CLAUDE.md` or the PRD after step 6 needs a re-approval:
+`agent-bridge approve` (UI: `a`). A supervisor session reads `docs/SUPERVISOR.md` only
+when it starts, so after changing it start a fresh one: `agent-bridge pin
+--new-supervisor`.
 
 ## 3. Per project
 
@@ -108,7 +126,11 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
   - `.bridge/unsent_reply.md` is a stale "Noted. Wait." from 2026-10-03 02:40; the run
     after it completed.
   - The builder session (`ses_f08e8379…`) reached about 968k tokens per request.
-- **Fresh sessions are the better start:** run step 1 without `--adopt-legacy`.
+- **Fresh sessions are the better start:** run step 2 without `--adopt-legacy`. (If it is
+  adopted anyway, the stale reply is now skipped because `builder_last.md` is newer.)
+- **Record phases 1–3** (step 7): the README's status says they are complete, WORKLOG
+  shows the Phase 1 exit accepted at `8f9faed`, the Phase 2 exit met on the dev backend,
+  and the Phase 3 exit statement.
 - **The next owner round:**
   1. `agent-bridge review --template docs/OWNER_REVIEW2.md` lists the autonomous
      decisions still unreviewed and the OWNER-BLOCKED items.
@@ -120,7 +142,7 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
 - The builder session went on working, unsupervised, until 17:35 that day (INVENTORY
   L2, L4). `builder_last.md` (04:11) is older than the session's real state.
 - Check first whether Kaggle kernels or the E4 wrapper are still running.
-- Move `.bridge/builder_last.md` aside, then run step 1 with `--adopt-legacy`. That keeps
+- Move `.bridge/builder_last.md` aside, then run step 2 with `--adopt-legacy`. That keeps
   the builder session, which knows the Kaggle state.
 - Start with an owner kickoff:
 
@@ -132,7 +154,7 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
 
 - `builder_last.md` (13:47) is the latest report, about job 84078 waiting for a quiet
   host.
-- Run step 1 with `--adopt-legacy`; it becomes the supervisor's first review.
+- Run step 2 with `--adopt-legacy`; it becomes the supervisor's first review.
 - Job 84078 was no longer running when this was written (`ps -p 84078` found nothing on
   2026-10-06), so the supervisor should first establish the job's state.
 - Then `agent-bridge run --forever`.
@@ -154,6 +176,11 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
   (L22).
 - **Report.** `agent-bridge report` and the PROJECT COMPLETE report replace reading the
   logs by hand.
+- **A results register.** The rules block requires every reported number to have a row
+  in `docs/RESULTS.md`, marked development or real. A migrated project has none, so the
+  supervisor's first task is usually to build it from the numbers already published
+  (FillingQA: 201 rows). To avoid that, point `[project] results` at an existing
+  register before approving.
 - **Phases are not headings in xbrl-frontier and netcode-testbed.** Their phase plans are
   tables in PRD section 9; FillingQA's are `### Phase N` headings under section 14. The
   bridge finds phases only as `Phase N` headings. For X and N the supervisor works from

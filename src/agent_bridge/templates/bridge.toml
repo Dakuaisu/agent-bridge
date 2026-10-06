@@ -13,7 +13,7 @@ results = $results                       # the builder's results register (devel
 mode = "autonomous"                      # autonomous | escalate
 $worklog_line
 # phases = "PRD section 14"              # where the phase plan is, if not under "Phase" headings
-# supervisor_rules = "docs/SUPERVISOR.md"   # extra supervisor principles
+$supervisor_rules_line
 # env_file = ".env"                      # opt-in; loaded into the builder's environment only
 
 # Each role picks its engine (claude-code | opencode) and model. Planner and supervisor

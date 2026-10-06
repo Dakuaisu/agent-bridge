@@ -167,6 +167,7 @@ def cmd_init(a: argparse.Namespace) -> int:
         created=f"{now():%Y-%m-%d %H:%M}",
         decisions=decisions,
         worklog="docs/WORKLOG.md" if exists("docs/WORKLOG.md") else None,
+        supervisor_rules="docs/SUPERVISOR.md" if exists("docs/SUPERVISOR.md") else None,
         roles=roles,
         opencode_port=port,
     )
@@ -181,6 +182,13 @@ def cmd_init(a: argparse.Namespace) -> int:
     agents = repo / "AGENTS.md"
     if not agents.exists() and not agents.is_symlink():
         print("suggestion: ln -s CLAUDE.md AGENTS.md  (opencode reads AGENTS.md; Claude Code reads CLAUDE.md)")
+    if cfg.project.supervisor_rules:
+        print(f"  {'supervisor':<11} {cfg.project.supervisor_rules.relative_to(repo)}: found")
+    elif exists("tools/bridge.py"):
+        print(
+            "legacy: the old tools/bridge.py kept project rules for the supervisor in its SYSTEM and AUTONOMOUS prompts. "
+            "Copy the project parts into docs/SUPERVISOR.md and set project.supervisor_rules (docs/MIGRATION.md section 1)."
+        )
     warning = runtime.version_warning("opencode", cfg.opencode.accept) if not cfg.uses_opencode() else None
     if warning:
         print(f"warning: {warning}")
@@ -238,6 +246,15 @@ def cmd_approve(a: argparse.Namespace) -> int:
     repo, cfg, sd = load_project(a)
     holder = lock_holder(sd.lock)
     ids = list(a.ids or []) + ([a.reject] if a.reject else [])
+    if a.done:
+        if ids:
+            raise runtime.UsageError("--done records phases; settle plan changes in a separate approve")
+        if holder:
+            raise runtime.UsageError(f"a bridge is running (pid {holder.get('pid')}); stop it before recording phases")
+        engine = runtime.build_engine(cfg, sd, live=False)
+        for line in runtime.run_locked(engine, ["approve", "--done", *a.done], lambda: engine.record_done(a.done, reason=a.reason or "")) or []:
+            print(line)
+        return EXIT_OK
     if ids:
         if holder:
             sd.inbox_put("approve", {"ids": ids, "reject": bool(a.reject), "reason": a.reason or ""}, iso(now()))
@@ -682,7 +699,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = command("approve", cmd_approve, "approve the plan, adopt an existing contract, or settle waiting plan changes")
     p.add_argument("ids", nargs="*", metavar="PC-n", help="plan changes to approve")
     p.add_argument("--reject", metavar="PC-n", help="reject a waiting plan change")
-    p.add_argument("--reason", help="why (with --reject)")
+    p.add_argument("--done", action="append", metavar="PHASE", help='record a phase finished before agent-bridge as complete: 3, "Phase 3" or its heading (repeatable)')
+    p.add_argument("--reason", help="why (with --reject), or the evidence (with --done)")
     mode(p)
 
     p = command("decide", cmd_decide, "apply an owner decisions doc (D-items and a Done when list) through the planner")

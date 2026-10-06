@@ -403,6 +403,7 @@ def render_config_template(
     open_items: str = "docs/OPEN.md",
     results: str = "docs/RESULTS.md",
     worklog: str | None = None,
+    supervisor_rules: str | None = None,
     roles: dict[str, tuple[str, str]] | None = None,
     opencode_port: int | None = None,
 ) -> str:
@@ -419,6 +420,11 @@ def render_config_template(
         "open_items": toml_str(open_items),
         "results": toml_str(results),
         "worklog_line": f"worklog = {toml_str(worklog)}" if worklog else '# worklog = "docs/WORKLOG.md"',
+        "supervisor_rules_line": (
+            f"supervisor_rules = {toml_str(supervisor_rules)}       # the project's own rules for the supervisor"
+            if supervisor_rules
+            else '# supervisor_rules = "docs/SUPERVISOR.md"   # the project\'s own rules for the supervisor'
+        ),
     }
     chosen = {role: (d["engine"], d["model"]) for role, d in ROLE_DEFAULTS.items()}
     chosen.update(roles or {})

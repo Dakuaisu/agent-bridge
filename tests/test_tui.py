@@ -419,3 +419,26 @@ def test_the_real_curses_app_runs_in_a_pseudo_terminal(tmp_path: Path, args: lis
     finally:
         assert lock
         lock.release()
+
+
+def test_setup_leaves_legacy_state_alone_by_default_and_records_phases(tmp_path: Path) -> None:
+    old = S.blank(tmp_path, with_contract=True)
+    (old / ".bridge").mkdir()
+    (old / ".bridge/session").write_text("ses_old\n")
+    (old / "tools").mkdir()
+    (old / "tools/bridge.py").write_text("SYSTEM = ''\n")
+    app = app_for(old)
+    app.key("i")
+    assert "copy the project parts into docs/SUPERVISOR.md" in screen(app)
+    app.key("ctrl-s")
+    assert last_argv(app) == ["init", "--repo", str(app.repo), "--write-rules"]
+
+    repo, _ = S.running(tmp_path, hold_lock=False)
+    app = app_for(repo)
+    app.act_phases()
+    form = app.modals[-1]
+    assert isinstance(form, Form) and "Phase 2 - Reconciliation engine" in screen(app)
+    keys(app, " ", "tab", "tab", "tab")
+    type_text(app, "WORKLOG 2026-10-01")
+    app.key("ctrl-s")
+    assert last_argv(app) == ["approve", "--done", "Phase 2", "--reason", "WORKLOG 2026-10-01", "--repo", str(app.repo)]

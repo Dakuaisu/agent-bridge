@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -137,6 +138,14 @@ def preflight(engine: ContractEngine, roles: tuple[str, ...] = ROLES) -> tuple[l
     _, email = engine.repo.local_identity()
     if not email:
         warnings.append("this repo has no local git user.email; the builder's commits will use your global identity")
+    p = engine.cfg.project
+    if p.supervisor_rules and not p.supervisor_rules.exists():
+        warnings.append(f"project.supervisor_rules names {p.supervisor_rules.relative_to(p.repo)}, which does not exist; the supervisor runs without project rules")
+    elif not p.supervisor_rules and (p.repo / "tools" / "bridge.py").exists():
+        warnings.append(
+            "this repo has an old tools/bridge.py but no project.supervisor_rules: the old bridge's project rules for the "
+            "supervisor are not loaded (copy them into docs/SUPERVISOR.md; docs/MIGRATION.md section 1)"
+        )
     return fatal, warnings
 
 
@@ -210,11 +219,20 @@ def import_legacy(sd: StateDir, cfg: Config, state: State) -> list[str]:
     atomic_write_json(sd.sessions, registry)
     unsent = old / "unsent_reply.md"
     last = old / "builder_last.md"
-    if unsent.exists() and unsent.read_text().strip():
+    has_unsent = unsent.exists() and bool(unsent.read_text().strip())
+    has_last = last.exists() and bool(last.read_text().strip())
+    # The old bridge ran past an unsent reply if a later builder report exists; delivering it would be stale.
+    stale = has_unsent and has_last and last.stat().st_mtime > unsent.stat().st_mtime
+    if stale:
+        notes.append(
+            f"unsent_reply.md ({_stamp(unsent)}) is older than builder_last.md ({_stamp(last)}): "
+            "the old bridge ran past it, so it is not delivered"
+        )
+    if has_unsent and not stale:
         state.pending = new_pending(supervisor=unsent.read_text().strip(), supervisor_note="(saved by the old bridge when it stopped)")
         state.phase = "BUILDER_TURN"
         notes.append("the old bridge's unsent supervisor reply is the next builder message")
-    elif last.exists() and last.read_text().strip():
+    elif has_last:
         report = sd.turns / "legacy-builder-report.md"
         sd.turns.mkdir(parents=True, exist_ok=True)
         report.write_text(last.read_text())
@@ -222,6 +240,10 @@ def import_legacy(sd: StateDir, cfg: Config, state: State) -> list[str]:
         state.phase = "SUPERVISOR_TURN"
         notes.append("the old builder_last.md is the next report for the supervisor to review")
     return notes
+
+
+def _stamp(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
 
 
 def rules_block_diff(cfg: Config) -> tuple[str, str]:
