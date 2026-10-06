@@ -215,7 +215,7 @@ resends the interrupted turn.
 - **Live use is still small.**
   - Haiku smoke tests in temporary repos: three on Claude Code (the last reached PROJECT
     COMPLETE) and one on opencode.
-  - One real project: FillingQA moved on 2026-10-06 with the default Claude Code models
+  - One real project: FilingQA moved on 2026-10-06 with the default Claude Code models
     (`docs/MIGRATION.md`, section 6). Its first run lasted about 8 minutes (two builder
     turns on `claude-opus-5-5`, one supervisor turn on `claude-fable-5-1`) before it was
     stopped by hand.
@@ -223,10 +223,10 @@ resends the interrupted turn.
     PROJECT COMPLETE, sleeps for WAITs or usage limits, `decide`, an opencode role, and
     what was added after that run (the builder sandbox, `project.verify`, notifications,
     cost tracking).
-- **Migration:** FillingQA has moved; xbrl-frontier and netcode-testbed have not.
+- **Migration:** FilingQA has moved; xbrl-frontier and netcode-testbed have not.
 - **The terminal UI is keyboard-only.** There is no mouse support, so your terminal's own
   text selection keeps working. Inside tmux or screen with a ctrl-a prefix, press it
   twice to send ctrl-a, or use `:` → All projects.
 - **The UI has been used on one real project.** Its command log shows init, check,
-  approve, run and stop on the FillingQA move. Its other commands were tested only in a
+  approve, run and stop on the FilingQA move. Its other commands were tested only in a
   pseudo-terminal and with rendered previews.

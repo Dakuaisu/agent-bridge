@@ -9,7 +9,7 @@ Entries made during the overnight build of 2026-10-06, without the owner, carry
 - Status: AUTONOMOUS DECISION - owner to review
 
 DESIGN v3 showed `# port = 4096` as a commented default. Options:
-- **Default to 4096.** Simple, but a new project would attach to FillingQA's server
+- **Default to 4096.** Simple, but a new project would attach to FilingQA's server
   (4096) and drive its sessions in that server's environment.
 - **Require `[opencode] port` whenever a role uses opencode.** `init` picks a free port.
 
@@ -236,11 +236,11 @@ The owner chose:
   files stay under `~/.local/state/agent-bridge/ui/` (the newest 200), so what was sent is
   on record.
 
-## DEC-019 Migration fixes found on the FillingQA move
+## DEC-019 Migration fixes found on the FilingQA move
 - Decided by: build agent (2026-10-06, at the owner's request)
 - Status: AUTONOMOUS DECISION - owner to review
 
-The owner migrated FillingQA with the terminal UI. The check found four gaps:
+The owner migrated FilingQA with the terminal UI. The check found four gaps:
 - **A stale unsent reply was delivered.** The old bridge's "Noted. Wait." from 10-03
   02:40 became the first builder message, and the builder planned to wait until the next
   morning.

@@ -1,6 +1,6 @@
-# Moving FillingQA, xbrl-frontier and netcode-testbed onto agent-bridge
+# Moving FilingQA, xbrl-frontier and netcode-testbed onto agent-bridge
 
-Status: FillingQA moved on 2026-10-06 (section 6 says what happened); xbrl-frontier and
+Status: FilingQA moved on 2026-10-06 (section 6 says what happened); xbrl-frontier and
 netcode-testbed have not moved. Follow this per project, with that project's old bridge
 stopped.
 
@@ -28,7 +28,7 @@ stopped.
 
 | Old environment variable | `bridge.toml` |
 |---|---|
-| `BRIDGE_ATTACH` (port) | `[opencode] port` (4096 FillingQA, 4097 xbrl-frontier, 4098 netcode-testbed) |
+| `BRIDGE_ATTACH` (port) | `[opencode] port` (4096 FilingQA, 4097 xbrl-frontier, 4098 netcode-testbed) |
 | `BRIDGE_SUPERVISOR`, `BRIDGE_MODEL`, `BRIDGE_VARIANT`, `BRIDGE_EFFORT` | `[supervisor] engine`, `model`, `variant` |
 | `BRIDGE_BUILDER_MODEL`, `BRIDGE_BUILDER_TIMEOUT` | `[builder] model`, `timeout` |
 | `BRIDGE_BUILDER_SKIP_PERMS` | always on (`--auto` for opencode, `bypassPermissions` for Claude Code) |
@@ -46,7 +46,7 @@ What the old `SYSTEM` and `AUTONOMOUS` texts become:
 
 | Project | `SYSTEM` (project parts) | `AUTONOMOUS` (project parts) |
 |---|---|---|
-| FillingQA | the builder description (lines 131–132) and the docs to read (138–141) | owner-only work (180–185) and the completion check (191–197) |
+| FilingQA | the builder description (lines 131–132) and the docs to read (138–141) | owner-only work (180–185) and the completion check (191–197) |
 | xbrl-frontier | the description and docs (154–170), principles 1–2 (175–186) and the section 2 scope rule (189–190) | dependencies (218–221), owner-only work (222–232), Kaggle and money, T-033 (233–242), the completion check (250–253) |
 | netcode-testbed | the description and docs (168–185) and principles 1–4 and 6 (190–222) | dependencies (252–257), owner-only work (258–276), quiet host and fallbacks (277–282), the completion check (294–299) |
 
@@ -79,7 +79,7 @@ until `docs/SUPERVISOR.md` exists. Steps 1, 3 and 7 below still need you.
      them; the default effort only goes with the default model (DEC-015).
 
 3. Edit `bridge.toml`, `[project]`:
-   - uncomment `phases`: `"PRD section 14"` for FillingQA, `"PRD section 9"` for the
+   - uncomment `phases`: `"PRD section 14"` for FilingQA, `"PRD section 9"` for the
      other two;
    - check that `supervisor_rules = "docs/SUPERVISOR.md"` is set;
    - for xbrl-frontier, `env_file = ".env"`. With the builder on opencode, the one
@@ -109,7 +109,7 @@ until `docs/SUPERVISOR.md` exists. Steps 1, 3 and 7 below still need you.
    without this it treats Phase 1 as current. Use `agent-bridge approve --done 1 --done 2
    --reason "<where it was verified>"` (UI: `:` → Record phases finished before
    agent-bridge). Each phase gets an OWNER DECISION entry in the ledger. Only `Phase N`
-   headings count, so this applies to FillingQA, whose phases are headings, and not to
+   headings count, so this applies to FilingQA, whose phases are headings, and not to
    the table-based plans of the other two.
 
 8. Start the project as described in section 3.
@@ -121,7 +121,7 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
 
 ## 3. Per project
 
-### FillingQA (4096): complete at the owner-blocked boundary since 2026-10-03 03:41
+### FilingQA (4096): complete at the owner-blocked boundary since 2026-10-03 03:41
 
 - **Do not adopt the legacy state.**
   - `.bridge/unsent_reply.md` is a stale "Noted. Wait." from 2026-10-03 02:40; the run
@@ -181,10 +181,10 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
 - **A results register.** The rules block requires every reported number to have a row
   in `docs/RESULTS.md`, marked development or real. A migrated project has none, so the
   supervisor's first task is usually to build it from the numbers already published
-  (FillingQA: 201 rows). To avoid that, point `[project] results` at an existing
+  (FilingQA: 201 rows). To avoid that, point `[project] results` at an existing
   register before approving.
 - **Phases are not headings in xbrl-frontier and netcode-testbed.** Their phase plans are
-  tables in PRD section 9; FillingQA's are `### Phase N` headings under section 14. The
+  tables in PRD section 9; FilingQA's are `### Phase N` headings under section 14. The
   bridge finds phases only as `Phase N` headings. For X and N the supervisor works from
   `phases = "PRD section 9"`, and PHASE COMPLETE still rotates the builder and is
   recorded, but the "every phase verified" hint and the current-phase line given to the
@@ -202,10 +202,10 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
    agent-bridge appended to `docs/TRADEOFFS.md` stay; revert them with git if you want.
 4. Revert `CLAUDE.md` with git if you applied `--write-rules`.
 
-## 6. What happened on the FillingQA move (2026-10-06)
+## 6. What happened on the FilingQA move (2026-10-06)
 
-From FillingQA's `.bridge/` logs, its git history and the UI's command log
-(`~/.local/state/agent-bridge/ui/`). Times are local (+05:30). FillingQA's local folder is
+From FilingQA's `.bridge/` logs, its git history and the UI's command log
+(`~/.local/state/agent-bridge/ui/`). Times are local (+05:30). FilingQA's local folder is
 `~/FillingQA`.
 
 **The steps.** The owner moved it with the terminal UI. Its command log shows:
@@ -250,7 +250,7 @@ Steps 1, 3 and 7 of section 2 were not done then: there was no `docs/SUPERVISOR.
 - `review.log` holds no alerts for the run, only the contract approval.
 
 **Fixes after the run,** at about 15:45:
-- In FillingQA (commit `99ab817`):
+- In FilingQA (commit `99ab817`):
   - `docs/SUPERVISOR.md` with the project's rules;
   - `supervisor_rules` and `phases` set in `bridge.toml`;
   - the contract re-approved (`DEC-003`);
@@ -264,7 +264,7 @@ Steps 1, 3 and 7 of section 2 were not done then: there was no `docs/SUPERVISOR.
     an old `tools/bridge.py` has no supervisor rules;
   - `approve --done`.
 
-**Not yet seen on FillingQA,** which has not run since 15:11 (checked at 18:59):
+**Not yet seen on FilingQA,** which has not run since 15:11 (checked at 18:59):
 - A supervisor turn with `docs/SUPERVISOR.md`.
 - The builder under the sandbox. The sandbox was added after the run and is on by
   default, so the next run is its first.

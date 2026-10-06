@@ -1,7 +1,7 @@
 # Morning report: the overnight build of agent-bridge (2026-10-06)
 
 Everything is committed locally with the repo's Dakuaisu identity, and nothing was pushed.
-There is no remote. The three projects (FillingQA, xbrl-frontier, netcode-testbed) were
+There is no remote. The three projects (FilingQA, xbrl-frontier, netcode-testbed) were
 only read. opencode is still 1.18.30, and no settings were changed.
 
 ## 1. What's built and working, by DESIGN.md step
@@ -27,7 +27,7 @@ Fixes from the live runs and the final checks:
 - 05fdd5c: the builder stays in its repo (L22).
 - 76c3218: the completion hint, and `.omo/` treated as tool state.
 - bf64e36: adopted supervisor sessions get the role text once.
-- 21fdf63: headings follow CommonMark fences (FillingQA's PRD hid all its phases), and
+- 21fdf63: headings follow CommonMark fences (FilingQA's PRD hid all its phases), and
   sessions resume only on their own engine.
 
 ## 2. Test results

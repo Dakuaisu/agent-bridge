@@ -225,7 +225,7 @@ A backend never retries; the engine owns every retry and sleep decision.
     is enforced.
   - Planner and supervisor cwd: a neutral per-role directory outside the repo
     (`~/.local/state/agent-bridge/<project-id>/<role>/`), with `--add-dir REPO`. That keeps
-    the builder's `CLAUDE.md` out of their context, the same lesson as FillingQA's
+    the builder's `CLAUDE.md` out of their context, the same lesson as FilingQA's
     `claude_cli` generator. The smoke test confirms that reads through `--add-dir` work;
     if not, the fallback is cwd = repo, as in the old claude path.
 - **Sessions.** The bridge generates the UUID and persists it before the first call,
@@ -989,7 +989,7 @@ An outside audit reproduced each finding below with a script; each fix has a tes
 version = 1
 
 [project]
-name = "FillingQA"
+name = "FilingQA"
 repo = "."                               # relative to this file
 prd = "docs/PRD.md"
 rules = ["CLAUDE.md"]                    # AGENTS.md is a symlink to CLAUDE.md
@@ -1239,7 +1239,7 @@ silently.
 - **Install:** `uv tool install --editable ~/agent-bridge`, or `pip` under
   `/opt/homebrew/bin/python3.12`. The `python3` on PATH is 3.9.
 
-## 16. Migration plan (detail in `docs/MIGRATION.md`; FillingQA moved on 2026-10-06, the other two have not)
+## 16. Migration plan (detail in `docs/MIGRATION.md`; FilingQA moved on 2026-10-06, the other two have not)
 
 Per project, while its bridge is stopped:
 

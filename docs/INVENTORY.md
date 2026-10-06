@@ -177,7 +177,7 @@ session goes idle; the bridge sees a hang.
   `serve.log` ("resets in 44912 seconds", "next account free in 12h 29m"). The bridge
   timed out at 07:12, 10:12 and 13:12.
 - `claude -p` reports the same condition as an error result: "You've hit your session
-  limit · resets 9:40pm (Asia/Calcutta)" (FillingQA's own eval,
+  limit · resets 9:40pm (Asia/Calcutta)" (FilingQA's own eval,
   `eval/runs/7a079fe7abfe.errors.jsonl`).
 - Fixed: nowhere. agent-bridge: read opencode's session status (`retry` with its `next`
   time) and claude's limit messages, abort the turn, and sleep until the reset.
@@ -244,7 +244,7 @@ lost. agent-bridge: owner messages go verbatim to both agents, labelled as the o
 
 **L12. Bridge text taken for an owner instruction.** The repeat detector's boilerplate
 ("Take the next concrete unblocked task from PRD section 14 and docs/OPEN.md") is
-unlabelled. In the FillingQA owner review (10-02) the owner had to say it was not from
+unlabelled. In the FilingQA owner review (10-02) the owner had to say it was not from
 them. agent-bridge: every injected line is labelled `[bridge]`, and no project task text
 is hard-coded.
 
@@ -265,9 +265,9 @@ supervisor session is closed, and new work always starts a fresh one.
 ("supervisor session cleared"): the launch command truncated it. agent-bridge: the
 bridge writes its own append-only console log, with launch markers.
 
-**L17. State copied across projects (X).** `.bridge/_filingqa_copy/` holds FillingQA's
+**L17. State copied across projects (X).** `.bridge/_filingqa_copy/` holds FilingQA's
 `session` and `supervisor_session` from when the script was copied. Left in place, X's
-bridge would have driven FillingQA's builder: the server accepts any session id. agent-
+bridge would have driven FilingQA's builder: the server accepts any session id. agent-
 bridge: check that a pinned session's directory is this repo.
 
 **L18. Shared-login logouts.** F's `serve.log` shows 9 warnings that a pool account
@@ -320,7 +320,7 @@ server is bound to localhost, but any local process can drive an `--auto` builde
   as well.
 - **Report format.** `DECISIONS NEEDED:` and `PROCEEDING:` are defined in `CLAUDE.md` for
   the builder; the supervisor is told never to use them.
-- **Wording matters.** FillingQA's `CLAUDE.md` is written for an interactive developer
+- **Wording matters.** FilingQA's `CLAUDE.md` is written for an interactive developer
   ("Ask before adding a dependency", "Stop and ask if something in the PRD looks
   wrong"). X inherited that wording, and it led to L5.
 
@@ -334,7 +334,7 @@ server is bound to localhost, but any local process can drive an `--auto` builde
   items skipped, completion at the owner-blocked boundary. Both real completions put the
   sentinel on the first line (F 10-02 13:18 and 10-03 03:41, X 10-02 15:01).
 - The owner loop: owner decisions in `docs/OWNER_REVIEW.md` (D1–D6 with a "Done when"
-  checklist), a short kickoff pointing at it, and a fresh supervisor. FillingQA went from
+  checklist), a short kickoff pointing at it, and a fresh supervisor. FilingQA went from
   owner review to the owner-blocked boundary in one unattended run.
 - Pinned opencode 1.18.30, one server per project on its own port, and
   `opencode attach` as the live view.
