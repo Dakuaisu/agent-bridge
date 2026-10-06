@@ -77,6 +77,7 @@ DASHBOARD
   o      the owner to-do: decisions to review, OWNER-BLOCKED items
   p      the owner-review report
   l      logs: transcript, alerts, console, events
+  e      change engines and models (Claude Code, opencode) per role
   ↑ ↓ PgUp PgDn   scroll the stream; End follows it live again
   w      wrap long stream lines
   :      every command (also ctrl-p)
@@ -353,6 +354,7 @@ class App:
             "p": self.act_report,
             "l": self.act_logs,
             "c": self.act_check,
+            "e": self.act_engines,
             "n": self.act_new,
             "q": self.act_quit,
         }
@@ -491,6 +493,13 @@ class App:
             return self.why_config()
         if self.snap.state.contract is None:
             return "approve a contract first"
+        return self.why_busy()
+
+    def why_engines(self) -> str | None:
+        if self.why_config():
+            return self.why_config()
+        if self.snap.holder:
+            return "stop the bridge first: a run keeps the engines it started with"
         return self.why_busy()
 
     def why_fresh(self) -> str | None:
@@ -833,6 +842,70 @@ class App:
 
         self.launch("check", ["check", "--repo", str(self.repo)], then=show)
 
+    def act_engines(self) -> None:
+        """Change the engine and model of any role (agent-bridge engines), starting from the current setup."""
+        if not self.guard(self.why_engines):
+            return
+        cfg = self.snap.cfg
+        assert cfg is not None
+        current = {r: f"{cfg.role(r).engine}:{cfg.role(r).engine_model()}" for r in ROLES}
+        presets = [(label, roles) for label, roles in PRESETS if roles is not None]
+        preset = ChoiceField("Engines", ["Edit the roles below", *(label for label, _ in presets)])
+        fields = {r: LineField(r.capitalize(), current[r], when=lambda: preset.index == 0) for r in ROLES}
+
+        def chosen() -> dict[str, str]:
+            if preset.index == 0:
+                return {r: f.value.strip() for r, f in fields.items()}
+            return {**DEFAULT_ROLE, **presets[preset.index - 1][1]}
+
+        port = LineField(
+            "opencode port",
+            str(cfg.opencode.port or ""),
+            placeholder="empty: a free one is picked",
+            when=lambda: any(v.startswith("opencode:") for v in chosen().values()),
+        )
+        note = NoteField(
+            "bridge.toml is part of the approved contract: the change is recorded in the ledger and re-approved. "
+            "Roles whose engine changes start a fresh session. On opencode the planner and supervisor are read-only "
+            "by instruction only, and the builder is not sandboxed.",
+            T.FAINT,
+        )
+        repo = str(self.repo)
+
+        def go(form: Form, app: App) -> None:
+            roles = chosen()
+            for role, value in roles.items():
+                engine, sep, model = value.partition(":")
+                if not sep or engine not in ENGINES or not model:
+                    form.error = f"{role}: write ENGINE:MODEL, with ENGINE one of {', '.join(ENGINES)}"
+                    return
+            if roles == current:
+                form.error = "nothing changed"
+                return
+            argv = ["engines", *[x for r in ROLES for x in (f"--{r}", roles[r])]]
+            if port.visible() and port.value.strip():
+                if not port.value.strip().isdigit():
+                    form.error = "the opencode port is a number"
+                    return
+                argv += ["--port", port.value.strip()]
+            argv += ["--repo", repo]
+
+            def done(job: Job) -> str | None:
+                return "✓ engines changed and re-approved" if job.code == 0 else None
+
+            app.close(form)
+            app.launch("engines", argv, then=done)
+
+        self.push(
+            Form(
+                "CHANGE ENGINES",
+                [preset, *fields.values(), port, note],
+                [Button("Change", go), Button("Cancel", lambda f, a: a.close(f))],
+                width=96,
+                accent=87,
+            )
+        )
+
     def act_fresh(self, role: str) -> None:
         if not self.guard(self.why_fresh):
             return
@@ -1017,6 +1090,7 @@ class App:
             Command("Logs", "l", lambda a: a.act_logs(), self.why_config, "transcript console events alerts"),
             Command("Check the setup (no model calls)", "c", lambda a: a.act_check(), self.why_config, "check doctor"),
             Command("Record phases finished before agent-bridge", "", lambda a: a.act_phases(), self.why_phases, "phase done migration"),
+            Command("Change engines and models", "e", lambda a: a.act_engines(), self.why_engines, "engine model opencode claude backend"),
             Command("Fresh builder session", "", lambda a: a.act_fresh("builder"), self.why_fresh, "pin rotate"),
             Command("Fresh supervisor session", "", lambda a: a.act_fresh("supervisor"), self.why_fresh, "pin rotate"),
             Command("Fresh planner session", "", lambda a: a.act_fresh("planner"), self.why_fresh, "pin rotate"),

@@ -571,6 +571,70 @@ def cmd_report(a: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _role_text(engine: str, model: str, role: str) -> str:
+    from agent_bridge.config import RoleConfig
+
+    return f"{engine} {RoleConfig(role, engine, model, None, 1).engine_model()}"
+
+
+def cmd_engines(a: argparse.Namespace) -> int:
+    """Show the engines, or change some roles' engine and model in bridge.toml and re-approve it."""
+    import tomllib
+
+    from agent_bridge.config import config_from_dict, rewrite_roles
+
+    repo, cfg, sd = load_project(a)
+    wanted = roles_from(a)
+    if not wanted:
+        for role in ROLES:
+            r = cfg.role(role)
+            print(f"{role + ':':<12} {r.engine} {r.engine_model()}" + (f" (effort {r.variant})" if r.variant else ""))
+        if cfg.opencode.port:
+            print(f"{'opencode:':<12} port {cfg.opencode.port}")
+        print("\nchange with, for example: agent-bridge engines --builder opencode:anthropic/claude-opus-5-5   (UI: e)")
+        return EXIT_OK
+    holder = lock_holder(sd.lock)
+    if holder:
+        raise runtime.UsageError(f"a bridge is running (pid {holder.get('pid')}); stop it first: a run keeps the engines it started with")
+    changed = {role: em for role, em in wanted.items() if _role_text(*em, role) != _role_text(cfg.role(role).engine, cfg.role(role).model, role)}
+    if not changed:
+        print("nothing to change: those roles already use those engines and models")
+        return EXIT_OK
+    after = {r: changed.get(r, (cfg.role(r).engine, cfg.role(r).model)) for r in ROLES}
+    uses_opencode = any(engine == "opencode" for engine, _ in after.values())
+    port = a.port if a.port else (pick_port() if uses_opencode and not cfg.opencode.port else None)
+    text = rewrite_roles(cfg.path.read_text(encoding="utf-8"), changed, opencode_port=port)
+    new_cfg = config_from_dict(tomllib.loads(text), cfg.path)
+    for role, (engine, model) in changed.items():
+        if _role_text(new_cfg.role(role).engine, new_cfg.role(role).model, role) != _role_text(engine, model, role):
+            raise runtime.UsageError(f"could not rewrite [{role}] in {cfg.path.name}; edit it by hand")
+    st = State.load(sd.state)
+    drift_before = contract.drifted(cfg, st.contract.get("hashes", {})) if st.contract else []
+    atomic_write_text(cfg.path, text)
+    for role, (engine, _) in changed.items():
+        info = st.sessions.get(role) or {}
+        if info.get("id") and info.get("engine") != engine and not info.get("closed"):
+            st.sessions[role] = {**info, "closed": True}
+    st.save(sd.state)
+    summary = "; ".join(f"{role}: {_role_text(cfg.role(role).engine, cfg.role(role).model, role)} -> {_role_text(*em, role)}" for role, em in changed.items())
+    print(f"changed {summary}" + (f"; opencode port {port}" if port else ""))
+    if st.contract:
+        if drift_before:
+            print(f"the contract also changed elsewhere since its approval ({', '.join(drift_before)}): review it, then `agent-bridge approve`")
+        else:
+            engine = runtime.build_engine(load_config(cfg.path), sd, live=False, echo=False)
+            for line in runtime.run_locked(engine, ["engines"], lambda: engine.reapprove_contract(title="Engines changed by the owner", reason=f"Engines: {summary}.", via="agent-bridge engines")) or []:
+                print(line)
+    for role in changed:
+        backend = runtime._factory(new_cfg, sd)[role]
+        try:
+            backend.version_check()
+        except Exception as e:  # noqa: BLE001 - reported for the owner, not fatal here
+            print(f"warning: {role}: {e}")
+    print("roles whose engine changed start a fresh session on the next turn; `agent-bridge check` verifies the setup")
+    return EXIT_OK
+
+
 def cmd_ui(a: argparse.Namespace) -> int:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise runtime.UsageError("the UI needs a terminal; scripts use the subcommands (`agent-bridge --help`)")
@@ -783,6 +847,9 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(f"--{name}", action="store_true")
 
     command("check", cmd_check, "check the setup without any model call")
+
+    p = command("engines", cmd_engines, "show the engines and models, or change them (ENGINE:MODEL per role)")
+    roles(p)
 
     p = command("ui", cmd_ui, "the terminal UI; `agent-bridge` with no arguments opens it too")
     p.add_argument("--all", action="store_true", help="start on the list of all projects (ctrl-a)")

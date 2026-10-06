@@ -453,17 +453,18 @@ class ContractEngine(Engine):
         self.save()
         return notes
 
-    def reapprove_contract(self) -> list[str]:
+    def reapprove_contract(self, *, title: str = "Contract re-approved by the owner", reason: str = "", via: str = "agent-bridge approve") -> list[str]:
         changed = contract.drifted(self.cfg, (self.st.contract or {}).get("hashes", {}))
         self.cfg = load_config(self.cfg.path)
         hashes = contract.contract_hashes(self.cfg)
         listing = "\n".join(f"- {p}: sha256 {h}" for p, h in hashes.items())
+        why = f"{reason}\n\n" if reason else ""
         dec, _ = contract.append_decision(
             self.cfg.project.decisions,
-            title="Contract re-approved by the owner",
+            title=title,
             decided_by="owner",
-            status="OWNER DECISION (agent-bridge approve)",
-            body=f"Changed since the last approval: {', '.join(changed) or 'nothing'}.\n\n{listing}",
+            status=f"OWNER DECISION ({via})",
+            body=f"{why}Changed since the last approval: {', '.join(changed) or 'nothing'}.\n\n{listing}",
         )
         self.st.contract = {**(self.st.contract or {}), "hashes": hashes, "drift": [], "outside_drift": [], "approved_at": iso(self.now())}
         self.save()

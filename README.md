@@ -69,6 +69,7 @@ In a terminal, that opens the terminal UI on the current folder's project:
 | `o` | owner to-do |
 | `p` | report |
 | `l` | logs |
+| `e` | change engines and models per role |
 | `:` | every command |
 | `?` | help |
 | `q` | quit |
@@ -110,6 +111,17 @@ agent-bridge run --forever --kickoff "Start with ..."
 ```
 
 ### Choosing engines
+
+To change the engines of an existing project, press `e` in the UI, or run
+`agent-bridge engines --builder opencode:anthropic/claude-opus-5-5`. With no flags,
+`agent-bridge engines` shows the current setup. The command:
+- rewrites only those roles' lines in `bridge.toml`;
+- adds an opencode port when a role needs one;
+- re-approves the contract, with a ledger entry;
+- starts fresh sessions for the roles whose engine changed.
+
+It refuses while a bridge is running.
+
 
 Every role defaults to Claude Code: planner `claude-fable-5-1` at `max` effort,
 supervisor `claude-fable-5-1` at `xhigh`, builder `claude-opus-5-5`. Override per role

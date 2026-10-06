@@ -495,3 +495,76 @@ def render_config_template(
         '# accept = "1.18"'
     )
     return Template(text).substitute(values)
+
+
+# ----------------------------------------------------------------- changing engines in an existing file
+
+_TABLE = re.compile(r"^\s*\[\s*([A-Za-z0-9_.-]+)\s*\]\s*(#.*)?$")
+_ANY_TABLE = re.compile(r"^\s*\[")
+
+
+def _key_line(key: str, commented: bool) -> re.Pattern[str]:
+    lead = r"(\s*)#\s*" if commented else r"(\s*)"
+    return re.compile(lead + rf"({re.escape(key)})(\s*=\s*)(\"(?:[^\"\\]|\\.)*\"|'[^']*'|[^\s#]+)(.*)$")
+
+
+def _section(lines: list[str], table: str) -> tuple[int, int] | None:
+    for i, line in enumerate(lines):
+        m = _TABLE.match(line)
+        if m and m.group(1) == table:
+            end = next((j for j in range(i + 1, len(lines)) if _ANY_TABLE.match(lines[j])), len(lines))
+            return i, end
+    return None
+
+
+def _set_key(lines: list[str], table: str, key: str, value: str | None) -> None:
+    """Set `key = value` in [table], keeping the line's comment; None comments the key out."""
+    span = _section(lines, table)
+    if span is None:
+        if value is None:
+            return
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines += [f"[{table}]", f"{key} = {value}"]
+        return
+    start, end = span
+    active, commented = _key_line(key, False), _key_line(key, True)
+    for i in range(start + 1, end):
+        if m := active.match(lines[i]):
+            lines[i] = f"# {lines[i].lstrip()}" if value is None else f"{m.group(1)}{key}{m.group(3)}{value}{m.group(5)}"
+            return
+    if value is None:
+        return
+    for i in range(start + 1, end):
+        if m := commented.match(lines[i]):
+            lines[i] = f"{m.group(1)}{key}{m.group(3)}{value}{m.group(5)}"
+            return
+    lines.insert(start + 1, f"{key} = {value}")
+
+
+def _activate_table(lines: list[str], table: str) -> None:
+    """Turn a commented-out `# [table]` header (as `init` writes it) into a real one."""
+    if _section(lines, table) is not None:
+        return
+    pattern = re.compile(rf"^(\s*)#\s*(\[\s*{re.escape(table)}\s*\])(.*)$")
+    for i, line in enumerate(lines):
+        if m := pattern.match(line):
+            lines[i] = f"{m.group(1)}{m.group(2)}{m.group(3)}"
+            return
+
+
+def rewrite_roles(text: str, roles: dict[str, tuple[str, str]], *, opencode_port: int | None = None) -> str:
+    """bridge.toml with new engines and models for some roles; everything else, comments included, unchanged.
+
+    A role keeps its default effort only on its default engine and model (DEC-015)."""
+    lines = text.splitlines()
+    for role, (engine, model) in roles.items():
+        default = ROLE_DEFAULTS[role]
+        variant = default["variant"] if (engine, model) == (default["engine"], default["model"]) and engine == "claude-code" else None
+        _set_key(lines, role, "engine", toml_str(engine))
+        _set_key(lines, role, "model", toml_str(model))
+        _set_key(lines, role, "variant", toml_str(variant) if variant else None)
+    if opencode_port is not None:
+        _activate_table(lines, "opencode")
+        _set_key(lines, "opencode", "port", str(opencode_port))
+    return "\n".join(lines) + "\n"
