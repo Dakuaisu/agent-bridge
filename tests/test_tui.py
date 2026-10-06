@@ -527,3 +527,23 @@ def test_an_invalid_locale_does_not_stop_the_ui(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(curses, "wrapper", lambda body: None)
     assert tui_app.run_tui(Path.cwd()) == 0
     assert calls[:2] == ["", "C.UTF-8"]
+
+
+def test_the_locale_falls_back_to_c_utf8_then_c(monkeypatch: pytest.MonkeyPatch) -> None:
+    import curses
+    import locale
+
+    from agent_bridge.tui import app as tui_app
+
+    calls: list[str] = []
+
+    def setlocale(category: int, name: str = "") -> str:
+        calls.append(name)
+        if name in ("", "C.UTF-8"):
+            raise locale.Error("unsupported locale setting")
+        return name
+
+    monkeypatch.setattr(locale, "setlocale", setlocale)
+    monkeypatch.setattr(curses, "wrapper", lambda body: None)
+    assert tui_app.run_tui(Path.cwd()) == 0
+    assert calls == ["", "C.UTF-8", "C"]

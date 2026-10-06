@@ -1264,7 +1264,7 @@ def run_tui(folder: Path | None = None, *, show_all: bool = False) -> int:
         locale.setlocale(locale.LC_ALL, "")
     except locale.Error:
         # LANG names a locale this machine lacks; fall back rather than refuse to start.
-        for name in ("C.UTF-8", "en_US.UTF-8", "C"):
+        for name in ("C.UTF-8", "C"):
             try:
                 locale.setlocale(locale.LC_ALL, name)
                 break
