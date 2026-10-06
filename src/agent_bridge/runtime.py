@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from agent_bridge import contract
+from agent_bridge import contract, sandbox
 from agent_bridge.backends.base import Backend, BackendError, Unsupported
 from agent_bridge.backends.claude_code import ClaudeCodeBackend
 from agent_bridge.backends.opencode import OpencodeBackend, version_warning
@@ -72,7 +73,13 @@ def make_backends(cfg: Config, sd: StateDir) -> dict[str, Backend]:
         common = {"repo": cfg.project.repo, "project": cfg.project.name}
         if rc.engine == "claude-code":
             backends[role] = ClaudeCodeBackend(
-                rc, billing_mode=cfg.billing_mode, git_push=cfg.git_push, env_extra=env_extra if role == "builder" else None, **common
+                rc,
+                billing_mode=cfg.billing_mode,
+                git_push=cfg.git_push,
+                env_extra=env_extra if role == "builder" else None,
+                sandboxed=role == "builder" and sandbox.applies(cfg.safety.sandbox),
+                sandbox_writable=cfg.safety.sandbox_writable,
+                **common,
             )
         else:
             # One server serves every opencode role, so the env file reaches it if the builder is on opencode.
@@ -103,9 +110,82 @@ def build_engine(cfg: Config, sd: StateDir, *, echo: bool = True, live: bool = T
     journal = Journal(sd, clock, echo=echo)
     if live and echo:
         journal.add_listener(foreground_printer())
-    engine = ContractEngine(cfg, sd, journal, _factory(cfg, sd), clock=clock, confirm=confirm)
+    engine = ContractEngine(cfg, sd, journal, _factory(cfg, sd), clock=clock, confirm=confirm, notifier=make_notifier(cfg))
     engine.on_complete = lambda eng: _report_on_complete(eng)
     return engine
+
+
+def make_notifier(cfg: Config) -> Callable[[str, str, str], None] | None:
+    """Desktop notifications (macOS) and/or [notify] command, for pauses, completion and anything that needs the owner."""
+    if os.environ.get("AGENT_BRIDGE_NO_NOTIFY") == "1":
+        return None
+    desktop = cfg.notify.desktop and sys.platform == "darwin" and shutil.which("osascript") is not None
+    command = cfg.notify.command
+    if not desktop and not command:
+        return None
+
+    def notify(kind: str, title: str, message: str) -> None:
+        quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL, "start_new_session": True}
+        if desktop:
+            script = ["-e", "on run argv", "-e", 'display notification (item 2 of argv) with title "agent-bridge" subtitle (item 1 of argv)', "-e", "end run"]
+            subprocess.Popen(["osascript", *script, title, message], **quiet)  # type: ignore[call-overload]
+        if command:
+            env = dict(
+                os.environ,
+                AGENT_BRIDGE_EVENT=kind,
+                AGENT_BRIDGE_TITLE=title,
+                AGENT_BRIDGE_MESSAGE=message,
+                AGENT_BRIDGE_PROJECT=cfg.project.name,
+                AGENT_BRIDGE_REPO=str(cfg.project.repo),
+            )
+            subprocess.Popen(["/bin/sh", "-c", command], cwd=cfg.project.repo, env=env, **quiet)  # type: ignore[call-overload]
+
+    return notify
+
+
+LOG_ROTATE_BYTES = 64 * 1024 * 1024
+
+
+def rotate_logs(sd: StateDir, limit: int = LOG_ROTATE_BYTES, keep: int = 3) -> list[str]:
+    """Logs only grow; at a run's start each one over `limit` moves to .1 (and older copies shift, up to `keep`)."""
+    rotated = []
+    for path in (sd.events, sd.loop_log, sd.console_log, sd.review_log):
+        try:
+            if path.stat().st_size <= limit:
+                continue
+        except FileNotFoundError:
+            continue
+        for n in range(keep - 1, 0, -1):
+            older = path.with_name(f"{path.name}.{n}")
+            if older.exists():
+                os.replace(older, path.with_name(f"{path.name}.{n + 1}"))
+        os.replace(path, path.with_name(f"{path.name}.1"))
+        rotated.append(path.name)
+    return rotated
+
+
+def interrupt_on_signals() -> Callable[[], None]:
+    """SIGTERM and SIGHUP (a closed terminal) end a run like Ctrl-C: the turn's processes are ended on the way
+    out, and the state stays resumable. Returns a function that restores the previous handlers."""
+
+    def handler(signum: int, frame: object) -> None:
+        raise KeyboardInterrupt(f"signal {signal.Signals(signum).name}")
+
+    previous = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            previous[sig] = signal.signal(sig, handler)
+        except (ValueError, OSError):
+            pass
+
+    def restore() -> None:
+        for sig, old in previous.items():
+            try:
+                signal.signal(sig, old)
+            except (ValueError, OSError):
+                pass
+
+    return restore
 
 
 def _report_on_complete(engine: ContractEngine) -> None:
@@ -138,6 +218,10 @@ def preflight(engine: ContractEngine, roles: tuple[str, ...] = ROLES) -> tuple[l
     _, email = engine.repo.local_identity()
     if not email:
         warnings.append("this repo has no local git user.email; the builder's commits will use your global identity")
+    if engine.cfg.safety.sandbox == "on" and not sandbox.available():
+        fatal.append("safety.sandbox is \"on\", but sandbox-exec is not available here (macOS only); set it to \"auto\" or \"off\"")
+    elif engine.cfg.safety.sandbox == "on" and engine.cfg.role("builder").engine != "claude-code":
+        warnings.append("safety.sandbox applies to a Claude Code builder only; this opencode builder is not sandboxed")
     p = engine.cfg.project
     if p.supervisor_rules and not p.supervisor_rules.exists():
         warnings.append(f"project.supervisor_rules names {p.supervisor_rules.relative_to(p.repo)}, which does not exist; the supervisor runs without project rules")
@@ -170,12 +254,17 @@ def start_caffeinate(enabled: bool) -> subprocess.Popen[bytes] | None:
 def run_locked(engine: ContractEngine, argv: list[str], body: Callable[[], int]) -> int:
     lock = BridgeLock(engine.sd.lock)
     lock.acquire({"started": iso(engine.now()), "argv": argv})
+    restore = interrupt_on_signals()
     try:
         engine.sd.clear_stop()
+        rotated = rotate_logs(engine.sd)
         engine.j.launch_marker(argv)
+        if rotated:
+            engine.j.console(f"rotated {', '.join(rotated)} (each over {LOG_ROTATE_BYTES // (1024 * 1024)} MB; the old copies end in .1)")
         start_caffeinate(engine.cfg.safety.caffeinate)
         return body()
     finally:
+        restore()
         lock.release()
 
 

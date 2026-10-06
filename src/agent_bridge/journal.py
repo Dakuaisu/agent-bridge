@@ -61,10 +61,20 @@ class Journal:
         self.event("launch", argv=argv)
 
 
-def read_events(path: Path) -> list[dict[str, Any]]:
+def read_events(path: Path, tail_bytes: int | None = None) -> list[dict[str, Any]]:
+    """All events, or only those in the last `tail_bytes` of the file (status and logs need no more)."""
     records = []
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        if tail_bytes is None:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        else:
+            with path.open("rb") as f:
+                size = f.seek(0, 2)
+                f.seek(max(0, size - tail_bytes))
+                data = f.read()
+            lines = data.decode("utf-8", errors="replace").splitlines()
+            if size > tail_bytes and lines:
+                lines = lines[1:]
     except FileNotFoundError:
         return records
     for line in lines:

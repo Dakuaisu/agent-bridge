@@ -13,11 +13,33 @@ from pathlib import Path
 from typing import Any, Iterator
 
 
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+_UMASK = _umask()
+
+
 def atomic_write_text(path: Path, text: str) -> None:
+    """Write via a temp file and rename. A symlink keeps pointing at its (rewritten) target, the file keeps its
+    mode (new files get the umask's), and a file that used CRLF line endings keeps them."""
+    path = Path(os.path.realpath(path)) if Path(path).is_symlink() else Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        st = path.stat()
+        mode = st.st_mode & 0o7777
+        with path.open("rb") as existing:
+            crlf = b"\r\n" in existing.read(65536)
+    except FileNotFoundError:
+        mode, crlf = 0o666 & ~_UMASK, False
+    if crlf and "\r\n" not in text:
+        text = text.replace("\n", "\r\n")
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
@@ -185,6 +207,10 @@ class StateDir:
         return self.root / "STOP_NOW"
 
     @property
+    def agent_pid(self) -> Path:
+        return self.root / "agent.pid"
+
+    @property
     def unsent(self) -> Path:
         return self.root / "unsent_reply.md"
 
@@ -239,6 +265,16 @@ class StateDir:
             if isinstance(data, dict):
                 items.append(InboxItem(p, data))
         return items
+
+    def inbox_set_aside(self, item: InboxItem, error: str) -> Path:
+        """A queued item that failed: kept for the owner in inbox/failed/, never retried automatically."""
+        failed = self.inbox / "failed"
+        failed.mkdir(parents=True, exist_ok=True)
+        target = failed / item.path.name
+        with contextlib.suppress(FileNotFoundError):
+            os.replace(item.path, target)
+        (failed / f"{item.path.stem}.error.txt").write_text(error + "\n", encoding="utf-8")
+        return target
 
     def inbox_ack(self, item: InboxItem) -> None:
         done = self.inbox / "delivered"

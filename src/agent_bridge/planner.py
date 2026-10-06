@@ -16,7 +16,7 @@ from typing import Any
 from agent_bridge import contract, prompts
 from agent_bridge.backends.base import BackendError, select_text
 from agent_bridge.clock import iso
-from agent_bridge.config import ROLES, ConfigError, config_from_dict, load_config
+from agent_bridge.config import ROLES, Config, ConfigError, config_from_dict, load_config
 from agent_bridge.engine import EXIT_OK, EXIT_PAUSED, EXIT_UNSUPPORTED, Engine, new_pending
 from agent_bridge.protocol import (
     Block,
@@ -40,7 +40,7 @@ class PlanError(Exception):
 
 def _read(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return ""
 
@@ -133,6 +133,10 @@ class ContractEngine(Engine):
 
     def _ask_planner(self, blocks: list[Block], heading: str) -> PlannerOutput | int | None:
         backend = self.backends["planner"]
+        rotate_reason = self.st.rotate.pop("planner", None)
+        if rotate_reason:
+            old = self.retire_session("planner", rotate_reason)
+            self.j.review(f"PLANNER ROTATED ({rotate_reason})", f"retired session {old}; the plan is in the contract files")
         if backend.session_id is None:
             role = prompts.planner_role(self.cfg, self.enforcement["planner"], self.writable())
             backend.system_prompt = role
@@ -149,8 +153,10 @@ class ContractEngine(Engine):
         self._tripwire("planner", reply, before, after)
         self._check_models("planner", reply)
         self.j.transcript("PLANNER | planner reply", reply.text)
-        for key in ("timeouts_planner", "questions_planner", "errors_planner", "limit_sleep_s"):
+        for key in ("timeouts_planner", "questions_planner", "errors_planner", "limit_sleep_s", "limit_unknown_planner"):
             self.st.counters.pop(key, None)
+        if reply.context_tokens and reply.context_tokens >= self.cfg.rotation.planner_max_context_tokens:
+            self.st.rotate["planner"] = f"context reached {reply.context_tokens:,} tokens"
         out = parse_planner(select_text(reply, ("QUESTIONS:", "PLAN:", "CHANGE:", "NO CHANGE:")))
         self.j.event("planner_output", form=out.kind, errors=out.errors)
         return out
@@ -208,6 +214,7 @@ class ContractEngine(Engine):
                 return None
             self.st.phase = "PLAN_REVIEW"
             self.save()
+            self.notify("needs_you", "the plan is ready for review", "read it, then approve (UI: a, or `agent-bridge approve`)")
             self.j.console(self.plan_summary())
             return EXIT_PAUSED
         return self._plan_retry(out.errors or [f"expected {'QUESTIONS or PLAN' if stage == 'interview' else 'PLAN'}, got {out.kind}"])
@@ -232,6 +239,7 @@ class ContractEngine(Engine):
             return None
         self.st.phase = "INTERVIEW"
         self.save()
+        self.notify("needs_you", f"the planner asks {len(out.questions)} questions", "answer them (UI: i, or `agent-bridge say`)")
         self.j.event("interview", purpose=purpose, questions=len(out.questions))
         self.j.console(f"The planner asks:\n\n{text}\n\nAnswer with `agent-bridge say \"<answers>\"`, or `agent-bridge say \"use your recommendations\"`.")
         return EXIT_PAUSED
@@ -311,6 +319,16 @@ class ContractEngine(Engine):
             return [f"bridge.toml: not valid TOML: {e}"]
         except ConfigError as e:
             return [f"bridge.toml: {p}" for p in e.problems]
+        errors = self._config_identity_errors(new)
+        owner_only = new.owner_only_settings()
+        if owner_only:
+            if (self.st.planning or {}).get("auto_approve"):
+                errors.append(f"bridge.toml: {', '.join(owner_only)} is the owner's to set, never the planner's under --auto-approve")
+            else:
+                warnings.append(f"bridge.toml sets {', '.join(owner_only)}: an owner-only setting; check it before approving")
+        return errors
+
+    def _config_identity_errors(self, new: Config) -> list[str]:
         errors = []
         old = self.cfg
         if new.project.repo != old.project.repo:
@@ -324,12 +342,6 @@ class ContractEngine(Engine):
             a, b = old.role(role), new.role(role)
             if (a.engine, a.model) != (b.engine, b.model):
                 errors.append(f"bridge.toml: keep [{role}] engine and model as given ({a.engine}, {a.model})")
-        owner_only = new.owner_only_settings()
-        if owner_only:
-            if (self.st.planning or {}).get("auto_approve"):
-                errors.append(f"bridge.toml: {', '.join(owner_only)} is the owner's to set, never the planner's under --auto-approve")
-            else:
-                warnings.append(f"bridge.toml sets {', '.join(owner_only)}: an owner-only setting; check it before approving")
         return errors
 
     def write_plan(self, out: PlannerOutput, files: dict[Path, str], warnings: list[str]) -> None:
@@ -660,7 +672,40 @@ class ContractEngine(Engine):
             results = contract.apply_edits_in_memory(self.cfg, out.edits, self.cfg.planning_docs())
         except contract.EditError as e:
             return self._replan_retry([str(e)])
+        problems = self._check_change(results)
+        if problems:
+            return self._replan_retry(problems)
         return self._record_change(out, results)
+
+    def _check_change(self, results: list[contract.EditResult]) -> list[str]:
+        """What a plan change may not do, whatever it calls itself: touch the owner's settings, or rewrite who decided what."""
+        cfg = self.cfg
+        owner_source = (self.st.replan or {}).get("source") == "owner"
+        errors: list[str] = []
+        for r in results:
+            path = Path(r.path).resolve()
+            if path == cfg.path.resolve():
+                errors += self._check_config_change(r.after)
+            elif path == cfg.project.decisions.resolve():
+                errors += contract.protected_line_errors(self.rel(path), r.before, r.after, may_change_status=False)
+            elif path == cfg.project.open_items.resolve():
+                errors += contract.protected_line_errors(self.rel(path), r.before, r.after, may_change_status=owner_source)
+        return errors
+
+    def _check_config_change(self, text: str) -> list[str]:
+        try:
+            new = config_from_dict(tomllib.loads(text), self.cfg.path)
+        except tomllib.TOMLDecodeError as e:
+            return [f"bridge.toml: not valid TOML: {e}"]
+        except ConfigError as e:
+            return [f"bridge.toml: {p}" for p in e.problems]
+        errors = self._config_identity_errors(new)
+        if new.owner_settings() != self.cfg.owner_settings():
+            errors.append(
+                "bridge.toml: git.push, billing.mode, project.verify, the sandbox settings and notify.command are the "
+                "owner's to change; a plan change may not touch them"
+            )
+        return errors
 
     def _replan_retry(self, errors: list[str]) -> int | None:
         rp = self.st.replan or {}
@@ -766,6 +811,8 @@ class ContractEngine(Engine):
                 st.planner_queue.append(f"The plan changed: {pc} {out.title} ({dec}; diff {diff_rel}). Re-read the changed parts: {shown}.")
         self._save_change(record)
         self.j.review(f"PLAN CHANGE {pc} ({outcome}): {out.title}", f"{status}; affects {shown}; {dec}; diff {diff_rel}")
+        if outcome == "awaiting":
+            self.notify("needs_you", f"{pc} waits for your approval", out.title)
         self.j.event("plan_change", id=pc, outcome=outcome, affects=affects, dec=dec)
         if source == "owner":
             st.replans, st.replan_history = {}, {}
@@ -774,6 +821,12 @@ class ContractEngine(Engine):
             st.complete = None
             st.replan = None
             st.review = None
+            pl = st.planning or {}
+            if pl.get("interview_for") == "decide":
+                # The decide interview is over: left in place it would read as unfinished planning.
+                for key in ("interview_for", "questions", "auto_answers", "fix"):
+                    pl.pop(key, None)
+                st.planning = pl if pl.get("stage") else None
             st.pending = new_pending(planner=[f"{out.kickoff.strip()}\n\n(The plan change is {pc}, recorded as {dec}; diff {diff_rel}.)"])
             st.phase = "BUILDER_TURN"
             self.save()
@@ -896,7 +949,7 @@ class ContractEngine(Engine):
 
 def load_questions(sd_plan: Path) -> str:
     files = sorted(sd_plan.glob("questions-*.md"))
-    return files[-1].read_text(encoding="utf-8") if files else ""
+    return files[-1].read_text(encoding="utf-8", errors="replace") if files else ""
 
 
 def to_json(data: Any) -> str:

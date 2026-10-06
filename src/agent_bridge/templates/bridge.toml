@@ -15,6 +15,8 @@ $worklog_line
 # phases = "PRD section 14"              # where the phase plan is, if not under "Phase" headings
 $supervisor_rules_line
 # env_file = ".env"                      # opt-in; loaded into the builder's environment only
+# verify = "make test"                   # run by the bridge after every builder turn; the supervisor sees the result (owner-only)
+# verify_timeout = "15m"
 
 # Each role picks its engine (claude-code | opencode) and model. Planner and supervisor
 # are always read-only; on opencode that is by instruction only.
@@ -52,6 +54,7 @@ max = "24h"                              # longest WAIT before the supervisor ge
 # max_wall_time = "72h"                  # per `run` invocation, waits included
 max_unchanged_exchanges = 12             # consecutive exchanges with no repo change, outside waits
 max_replans_per_phase = 3
+# max_cost_usd = 50                      # per `run` invocation, at the engines' API prices (not your subscription bill)
 
 [rotation]
 builder_max_context_tokens = 600_000
@@ -64,3 +67,9 @@ phase_complete_pattern = '(?i)\bphase\s+[\w.-]+\s+(?:is\s+)?complete\b'   # buil
 [safety]
 danger_commands = []                     # extra regexes over the builder's shell commands
 caffeinate = true                        # macOS: keep the machine awake while running
+sandbox = "auto"                         # macOS: the Claude Code builder may write only in the repo, temp and tool caches (owner-only)
+# sandbox_writable = ["~/.my-tool"]      # extra folders the builder may write to
+
+[notify]                                 # when a run pauses, completes, or needs you
+desktop = true                           # macOS notification
+# command = "curl -s -d \"$$AGENT_BRIDGE_TITLE: $$AGENT_BRIDGE_MESSAGE\" https://ntfy.sh/my-topic"

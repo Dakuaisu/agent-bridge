@@ -63,6 +63,7 @@ class View:
     toasts: list[tuple[str, str]] = field(default_factory=list)
     starting: bool = False
     selected: int = 0
+    last_total: int = 0
 
 
 # ----------------------------------------------------------------- small pieces
@@ -148,6 +149,9 @@ def header(cv: Canvas, snap: Snapshot | None, view: View, title: str | None = No
             right.append((f"  exchange {st.exchange}", T.DIM))
         if snap.holder:
             right.append((f"  pid {snap.holder.get('pid')}", T.FAINT))
+        cost = (st.usage or {}).get("cost_usd")
+        if cost:
+            right.append((f"  ${cost:.2f}", T.FAINT))
     right.append((f"  {datetime.now():%H:%M:%S} ", T.FAINT))
     rw = sum(width(p[0]) for p in right)
     limit = cv.w - rw - 2
@@ -197,7 +201,9 @@ def toasts(cv: Canvas, items: list[tuple[str, str]]) -> None:
 
 def _read_only_part(rv: RoleView) -> Part:
     if rv.read_only == "writes":
-        return ("✎ writes the repo", Style(T.ROLE_DIM[rv.role] if rv.role in T.ROLE_DIM else 245))
+        if rv.guard == "sandboxed":
+            return ("✎ writes the repo · sandboxed", T.OK)
+        return ("✎ writes the repo · not sandboxed", T.WARN)
     if rv.read_only.startswith("enforced"):
         return ("◆ read-only · enforced", T.OK)
     return ("◇ read-only · by instruction only", T.WARN)
@@ -352,6 +358,9 @@ def stream(cv: Canvas, y: int, x: int, h: int, w: int, snap: Snapshot, view: Vie
         msg = "Nothing has happened here yet." if snap.configured else ""
         cv.put(y + h // 2, x + max(2, (w - width(msg)) // 2), msg, T.FAINT)
         return
+    if view.scroll > 0 and view.last_total and len(rows) > view.last_total:
+        view.scroll += len(rows) - view.last_total  # stay on the same lines while new ones arrive below
+    view.last_total = len(rows)
     view.scroll = max(0, min(view.scroll, max(0, len(rows) - inner_h)))
     end = len(rows) - view.scroll
     shown = rows[max(0, end - inner_h) : end]

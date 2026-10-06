@@ -6,6 +6,8 @@ a response is treated as "unknown", never as success.
 
 from __future__ import annotations
 
+import hashlib
+import http.client
 import json
 import os
 import re
@@ -24,6 +26,7 @@ from typing import Any, Callable
 from agent_bridge.backends.base import (
     READ_ONLY_BY_INSTRUCTION,
     AuthFailed,
+    BillingFailed,
     Backend,
     CancelToken,
     Cancelled,
@@ -117,6 +120,28 @@ class OpencodeDB:
             conn.close()
         return {"id": row[0], "title": row[1], "directory": row[2]} if row else None
 
+    def descendants(self, session_id: str) -> set[str]:
+        """Sessions started from this one (task subagents), at any depth."""
+        if not SESSION_ID.match(session_id):
+            return set()
+        conn = self._connect()
+        if conn is None:
+            return set()
+        found: set[str] = set()
+        frontier = [session_id]
+        try:
+            while frontier and len(found) < 500:
+                rows = conn.execute(
+                    f"SELECT id FROM session WHERE parent_id IN ({','.join('?' * len(frontier))})", frontier
+                ).fetchall()
+                frontier = [r[0] for r in rows if r[0] and r[0] not in found]
+                found.update(frontier)
+        except sqlite3.Error:
+            return found
+        finally:
+            conn.close()
+        return found
+
     def served_models(self, session_id: str, since_ms: int) -> set[str]:
         if not SESSION_ID.match(session_id):
             return set()
@@ -137,7 +162,8 @@ class OpencodeDB:
 
 
 class OpencodeServer:
-    def __init__(self, *, binary: str, port: int, repo: Path, serve_log: Path, env: dict[str, str], accept: str) -> None:
+    def __init__(self, *, binary: str, port: int, repo: Path, serve_log: Path, env: dict[str, str], accept: str, extra: dict[str, str] | None = None) -> None:
+        self.extra = dict(extra or {})
         self.binary = binary
         self.port = port
         self.repo = repo
@@ -176,11 +202,22 @@ class OpencodeServer:
             raise Unsupported(V2_HELP.format(version=f"server {version}"))
         return version or "unknown version"
 
+    @property
+    def env_record(self) -> Path:
+        return self.serve_log.parent / "serve-env.json"
+
+    def env_digest(self) -> str:
+        return hashlib.sha256(json.dumps(sorted(self.extra.items())).encode()).hexdigest()
+
     def ensure(self) -> int | None:
         """Start `opencode serve` if nothing is listening; returns the pid it started, if any."""
         if self.is_up():
             self.check_identity()
             return None
+        try:
+            self.env_record.write_text(json.dumps({"port": self.port, "env": self.env_digest(), "keys": sorted(self.extra)}) + "\n")
+        except OSError:
+            pass
         self.serve_log.parent.mkdir(parents=True, exist_ok=True)
         with self.serve_log.open("a", encoding="utf-8") as log:
             log.write(f"\n=== agent-bridge started opencode serve on port {self.port} at {datetime.now().astimezone().isoformat(timespec='seconds')} ===\n")
@@ -229,7 +266,13 @@ class OpencodeBackend(Backend):
         exe = shutil.which(binary) if os.sep not in binary else binary
         self._exe = exe or binary
         self.server = OpencodeServer(
-            binary=self._exe, port=port, repo=repo, serve_log=serve_log, env=child_env(billing_mode, env_extra), accept=accept
+            binary=self._exe,
+            port=port,
+            repo=repo,
+            serve_log=serve_log,
+            env=child_env(billing_mode, env_extra, engine="opencode"),
+            accept=accept,
+            extra=env_extra,
         )
         self.started_server_pid: int | None = None
 
@@ -249,13 +292,28 @@ class OpencodeBackend(Backend):
             warnings.append('~/.config/opencode/opencode.jsonc does not set "autoupdate": false; opencode may upgrade itself to 2.x')
         if self.server.is_up():
             version = self.server.check_identity()
+            try:
+                record = json.loads(self.server.env_record.read_text())
+            except (OSError, ValueError):
+                record = None
+            if record is None and self.server.extra:
+                warnings.append(
+                    f"the opencode server on port {self.server.port} was not started by agent-bridge, so it may lack the "
+                    "env_file's variables; stop it and let `run` start it"
+                )
+            elif record is not None and record.get("env") != self.server.env_digest():
+                warnings.append(
+                    f"the env_file changed after agent-bridge started the opencode server on port {self.server.port}; "
+                    "the server still has the old variables. Stop it so the next run starts it with the new ones"
+                )
             return Health(True, f"opencode server on {self.server.url} ({version})", tuple(warnings))
         return Health(True, f"no opencode server on {self.server.url} yet; `run` starts one", tuple(warnings))
 
     def capabilities(self) -> Capabilities:
         attach = f"opencode attach {self.server.url} --dir {self.repo}" + (f" --session {self._session_id}" if self._session_id else "")
         read_only = READ_ONLY_BY_INSTRUCTION if self.cfg.read_only else "n/a (the builder writes)"
-        return Capabilities(read_only=read_only, question_guard="polls the server; rejects and aborts any question", live_attach=attach)
+        guard = "" if self.cfg.read_only else "not sandboxed (opencode): writes outside the repo are found after the turn"
+        return Capabilities(read_only=read_only, question_guard="polls the server; rejects and aborts any question", live_attach=attach, write_guard=guard)
 
     def session_directory(self, session_id: str) -> str | None:
         info = self.db.session(session_id)
@@ -266,7 +324,7 @@ class OpencodeBackend(Backend):
     def _safe(self, method: str, path: str) -> Any:
         try:
             return self.server.api(method, path)
-        except (OSError, ValueError, urllib.error.URLError):
+        except (OSError, ValueError, urllib.error.URLError, http.client.HTTPException):
             return None
 
     def abort(self) -> None:
@@ -281,10 +339,17 @@ class OpencodeBackend(Backend):
         return None
 
     def _questions(self) -> list[dict[str, Any]]:
-        data = self._safe("GET", "/question")
-        if not isinstance(data, list):
+        """Pending questions from this turn's session or the subagent sessions it started.
+
+        Before the session id is known nothing is rejected: a question then could be the owner's own, from an
+        attached opencode window in the same folder."""
+        if not self._session_id:
             return []
-        return [q for q in data if isinstance(q, dict) and (not self._session_id or q.get("sessionID") == self._session_id)]
+        data = self._safe("GET", "/question")
+        if not isinstance(data, list) or not data:
+            return []
+        ours = {self._session_id} | self.db.descendants(self._session_id)
+        return [q for q in data if isinstance(q, dict) and q.get("sessionID") in ours]
 
     def command(self, message: str) -> list[str]:
         cmd = [self._exe, "run", "--attach", self.server.url, "--dir", str(self.repo), "--format", "json", "--auto", "-m", self.cfg.engine_model()]
@@ -355,10 +420,13 @@ class OpencodeBackend(Backend):
                 monitor=monitor,
                 monitor_every=self.monitor_every,
                 on_stall=lambda s: on_event(Event("status", f"no output for {int(s // 60)} minutes; still running")),
+                on_start=self.on_process,
             )
         except MonitorStop as stop:
             raise stop.error from None
         finally:
+            if self.on_process:
+                self.on_process(None)
             if raw:
                 raw.close()
         if result.cancelled:
@@ -387,6 +455,8 @@ class OpencodeBackend(Backend):
             duration_s=(int(time.time() * 1000) - started_ms) / 1000,
             raw_path=raw_path,
             steps=parser.steps(),
+            cost_usd=parser.cost_usd,
+            usage=parser.usage,
         )
 
     def _limit_from_retry(self, status: dict[str, Any], serve_offset: int) -> Exception | None:
@@ -430,6 +500,8 @@ def _classified(text: str, now: datetime) -> Exception:
     kind = classify(text)
     if kind == "auth":
         return AuthFailed(f"{text[:300]}. Run `claude login` (or re-enroll the pool account).")
+    if kind == "billing":
+        return BillingFailed(text[:300])
     if kind == "session_limit":
         return SessionLimit(text[:300], reset_at=parse_reset(text, now))
     if kind == "rate_limited":
@@ -448,6 +520,8 @@ class _EventParser:
         self.errors: list[str] = []
         self.models: set[str] = set()
         self.context_tokens: int | None = None
+        self.cost_usd: float | None = None
+        self.usage: dict[str, int] = {}
 
     def steps(self) -> list[str]:
         return [t for t in ("".join(s).strip() for s in self._steps) if t]
@@ -485,6 +559,11 @@ class _EventParser:
             cache = tokens.get("cache") or {}
             if tokens:
                 self.context_tokens = int(tokens.get("input") or 0) + int(cache.get("read") or 0) + int(cache.get("write") or 0)
+                for key, value in (("input_tokens", tokens.get("input")), ("output_tokens", tokens.get("output")), ("cache_read_input_tokens", cache.get("read"))):
+                    if value:
+                        self.usage[key] = self.usage.get(key, 0) + int(value)
+            if isinstance(part.get("cost"), (int, float)):
+                self.cost_usd = (self.cost_usd or 0.0) + float(part["cost"])
         elif kind == "error":
             err = data.get("error") or {}
             message = (err.get("data") or {}).get("message") if isinstance(err, dict) else None

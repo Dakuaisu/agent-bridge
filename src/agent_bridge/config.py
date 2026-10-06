@@ -99,6 +99,8 @@ class ProjectConfig:
     phases: str | None
     supervisor_rules: Path | None
     env_file: Path | None
+    verify: str | None = None
+    verify_timeout: int = 900
 
 
 @dataclass(frozen=True)
@@ -113,6 +115,7 @@ class BudgetConfig:
     max_wall_time: int | None = None
     max_unchanged_exchanges: int | None = 12
     max_replans_per_phase: int = 3
+    max_cost_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -129,6 +132,14 @@ class RotationConfig:
 class SafetyConfig:
     danger_commands: tuple[re.Pattern[str], ...] = ()
     caffeinate: bool = True
+    sandbox: str = "auto"
+    sandbox_writable: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class NotifyConfig:
+    desktop: bool = True
+    command: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +155,7 @@ class Config:
     budget: BudgetConfig
     rotation: RotationConfig
     safety: SafetyConfig
+    notify: NotifyConfig = NotifyConfig()
 
     def role(self, name: str) -> RoleConfig:
         return self.roles[name]
@@ -166,7 +178,15 @@ class Config:
             found.append('git.push = "allowed"')
         if self.billing_mode == "api-key":
             found.append('billing.mode = "api-key"')
+        if self.project.verify:
+            found.append(f"project.verify = {self.project.verify!r}")
+        if self.safety.sandbox == "off":
+            found.append('safety.sandbox = "off"')
         return found
+
+    def owner_settings(self) -> tuple[Any, ...]:
+        """What only the owner may change: a re-plan that changes any of it is refused."""
+        return (self.git_push, self.billing_mode, self.project.verify, self.safety.sandbox, self.safety.sandbox_writable, self.notify.command)
 
 
 class _Table:
@@ -296,6 +316,8 @@ def config_from_dict(data: dict[str, Any], path: Path) -> Config:
         phases=pt.get("phases", str, None),
         supervisor_rules=opt_path("supervisor_rules"),
         env_file=opt_path("env_file"),
+        verify=pt.get("verify", str, None) or None,
+        verify_timeout=pt.duration("verify_timeout", 900) or 900,
     )
     pt.finish()
 
@@ -342,6 +364,7 @@ def config_from_dict(data: dict[str, Any], path: Path) -> Config:
         max_wall_time=bu.duration("max_wall_time", None),
         max_unchanged_exchanges=bu.positive_int("max_unchanged_exchanges", 12),
         max_replans_per_phase=bu.positive_int("max_replans_per_phase", 3) or 3,
+        max_cost_usd=_positive_number(bu, "max_cost_usd"),
     )
     bu.finish()
 
@@ -367,8 +390,21 @@ def config_from_dict(data: dict[str, Any], path: Path) -> Config:
             danger.append(re.compile(pattern))
         except re.error as e:
             problems.append(f"safety.danger_commands[{i}]: invalid regular expression: {e}")
-    safety = SafetyConfig(danger_commands=tuple(danger), caffeinate=st.get("caffeinate", bool, True))
+    writable = st.get("sandbox_writable", list, [])
+    if any(not isinstance(w, str) or not w.startswith(("/", "~")) for w in writable):
+        problems.append("safety.sandbox_writable: absolute paths (or ~/...) only")
+        writable = []
+    safety = SafetyConfig(
+        danger_commands=tuple(danger),
+        caffeinate=st.get("caffeinate", bool, True),
+        sandbox=st.get("sandbox", str, "auto", choices=("auto", "on", "off")),
+        sandbox_writable=tuple(writable),
+    )
     st.finish()
+
+    nt = _Table(top.get("notify", dict, {}), "notify", problems)
+    notify = NotifyConfig(desktop=nt.get("desktop", bool, True), command=nt.get("command", str, None) or None)
+    nt.finish()
 
     top.finish()
     if problems:
@@ -385,7 +421,16 @@ def config_from_dict(data: dict[str, Any], path: Path) -> Config:
         budget=budget,
         rotation=rotation,
         safety=safety,
+        notify=notify,
     )
+
+
+def _positive_number(table: _Table, key: str) -> float | None:
+    value = table.get(key, (int, float), None)
+    if value is not None and value <= 0:
+        table._bad(key, f"must be positive; got {value}")
+        return None
+    return float(value) if value is not None else None
 
 
 def toml_str(value: str) -> str:

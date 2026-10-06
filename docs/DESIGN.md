@@ -912,6 +912,67 @@ Pauses, and anything the owner should review, also go to `review.log`.
 - **Repeat detection** no longer injects task text into the builder. It feeds the idle
   backstop (7.1), and its notes go to the supervisor, labelled `[bridge]` (L12).
 
+### 8.4 Hardening after the 2026-10-06 audit
+
+An outside audit reproduced each finding below with a script; each fix has a test in `tests/test_audit.py`
+(DEC-020).
+
+- **The agent never outlives its turn.**
+  - Any exception while a turn runs ends the agent's whole process group: Ctrl-C, a monitor stop, or a
+    parser error.
+  - SIGTERM and SIGHUP raise the same interrupt as Ctrl-C in every command that takes the lock, so a
+    closed terminal ends cleanly.
+  - On opencode the turn is also aborted on the server.
+  - The running agent's pid and start time go to `.bridge/agent.pid`. A bridge killed with SIGKILL cannot
+    clean up, so the next start ends that process, if it is the same one (same start time), before the
+    turn is resent.
+- **Prevent, not only detect.** On macOS the Claude Code builder runs under `sandbox-exec`.
+  - Its whole process tree may write only inside the repo, the temp folders, and the tools' own state:
+    Claude Code's files and caches, plus `safety.sandbox_writable`.
+  - It was verified live with Haiku: a write inside the repo worked, and a write to the home folder got
+    "operation not permitted".
+  - Detection still runs behind it. It now follows `~`, `$HOME`, `cd` and `git -C`. It masks the repo's
+    own path, which may contain spaces. When the builder wrote or committed but the repo did not change
+    (the L22 signature), the supervisor gets a note.
+  - The opencode builder is not sandboxed (OPEN-004).
+- **What a plan change may touch.**
+  - A re-plan that edits `bridge.toml` is always material, and is validated like a full plan.
+  - It may never change the owner-only settings: `git.push`, `billing.mode`, `project.verify`, the
+    sandbox settings and `notify.command`.
+  - Existing `Status:` and `Decided by:` lines in the ledger and open items cannot be changed or removed.
+    Open items are the exception during the owner's own `decide`.
+  - No new line may claim the owner's decision.
+- **One bad input never stops everything.**
+  - A queued owner item that fails is moved to `.bridge/inbox/failed/` with its error.
+  - Owner text is never used as a regex template.
+  - Display and contract reads tolerate bad UTF-8.
+  - The UI catches refresh errors, a malformed `$EDITOR` and an unknown locale.
+- **Near-misses are loud.** The parsers stay strict, but `PROJECT COMPLETE.` or `PROJECT COMPLETE: …`
+  gets one nudge instead of being ignored. Other fixes:
+  - a SCOPE written as a list is read;
+  - an empty SCOPE is a near-miss;
+  - `DECISIONS NEEDED: none` ends the list;
+  - a note after `WAIT FOR FILE <path>` is not part of the path;
+  - "401" means a login failure only next to an auth word or an HTTP status;
+  - billing errors pause the run instead of retrying.
+- **Evidence for the supervisor.**
+  - `project.verify` is run by the bridge after every builder turn, and its exit code and last lines go
+    to the supervisor. It is owner-only.
+  - The supervisor's message also lists which files the new commits touched.
+- **Unattended runs.**
+  - Desktop notifications on macOS and/or `[notify] command` when a run pauses, completes, or needs the
+    owner.
+  - Per-turn cost and token usage go into the events, `status` and the report. They are API prices,
+    which a subscription does not bill.
+  - `budget.max_cost_usd` caps a run.
+  - Logs over 64 MB rotate at a run's start, and `status` and `logs` read only the tail.
+- **Designed earlier, now built.**
+  - The planner rotates at `planner_max_context_tokens`.
+  - Stored sessions are checked against the repo at every start.
+  - `check` warns when the opencode server was started with a different `env_file`.
+  - `check` says how `git push` is blocked.
+  - STOP is checked every 5 s during waits.
+
 ## 9. Configuration: `bridge.toml`
 
 - Read with `tomllib`.
@@ -940,6 +1001,8 @@ mode = "autonomous"                      # autonomous | escalate
 # phases = "PRD section 14"              # where the phase plan is, if not under "Phase" headings
 # supervisor_rules = "docs/SUPERVISOR.md"   # extra supervisor principles (migrated projects)
 # env_file = ".env"                      # opt-in; builder environment only
+# verify = "make test"                   # run by the bridge after each builder turn (8.4); owner-only
+# verify_timeout = "15m"
 
 [planner]
 engine = "claude-code"                   # claude-code | opencode
@@ -976,6 +1039,7 @@ max = "24h"
 # max_wall_time = "72h"                  # per run invocation, waits included
 max_unchanged_exchanges = 12             # consecutive, outside waits
 max_replans_per_phase = 3
+# max_cost_usd = 50                      # per run invocation, at the engines' API prices (8.4)
 
 [rotation]
 builder_max_context_tokens = 600_000
@@ -988,6 +1052,12 @@ phase_complete_pattern = '(?i)\bphase\s+[\w.-]+\s+(?:is\s+)?complete\b'   # buil
 [safety]
 danger_commands = []                     # extra regexes over builder shell commands
 caffeinate = true                        # macOS
+sandbox = "auto"                         # auto | on | off; owner-only (8.4)
+# sandbox_writable = []                  # extra writable folders for the builder
+
+[notify]                                 # 8.4
+desktop = true
+# command = "..."                        # gets AGENT_BRIDGE_EVENT, _TITLE, _MESSAGE, _PROJECT, _REPO
 ```
 
 A role's `variant` default (`max`, `xhigh`) applies only when the role keeps its default

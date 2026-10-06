@@ -93,6 +93,7 @@ class SupervisorOutput:
     replan: Replan | None = None
     escalate: str | None = None
     warnings: list[str] = field(default_factory=list)
+    near_misses: list[str] = field(default_factory=list)
 
     @property
     def has_reply(self) -> bool:
@@ -111,6 +112,19 @@ def _value(n: str, key: str) -> str | None:
     return n[len(key):].strip() if n.startswith(key) else None
 
 
+def _near_sentinel(n: str) -> bool:
+    """PROJECT COMPLETE with something attached ('PROJECT COMPLETE.', 'PROJECT COMPLETE: ...'): never taken silently."""
+    return n != SENTINEL and n.upper().startswith(SENTINEL) and not n[len(SENTINEL):len(SENTINEL) + 1].isalnum()
+
+
+def _sentinel_problem(n: str) -> str:
+    shown = n if len(n) <= 60 else n[:57] + "..."
+    return (
+        f"'{shown}' was not taken as completion: if the project is complete, the first line must be exactly "
+        "PROJECT COMPLETE, alone"
+    )
+
+
 def parse_supervisor(raw: str, *, now: datetime) -> SupervisorOutput:
     out = SupervisorOutput(raw=raw)
     lines = raw.splitlines()
@@ -123,6 +137,8 @@ def parse_supervisor(raw: str, *, now: datetime) -> SupervisorOutput:
         if nonblank and normalize(body[nonblank[0]]) == SENTINEL:
             out.complete = True
             body = body[: nonblank[0]] + body[nonblank[0] + 1 :]
+        elif nonblank and _near_sentinel(normalize(body[nonblank[0]])):
+            out.near_misses.append(_sentinel_problem(normalize(body[nonblank[0]])))
         if any(normalize(ln) == SENTINEL for ln in body):
             out.warnings.append("PROJECT COMPLETE inside the REPLY body was ignored")
         out.reply = "\n".join(body).strip()
@@ -133,10 +149,22 @@ def parse_supervisor(raw: str, *, now: datetime) -> SupervisorOutput:
         i += 1
         if n == SENTINEL:
             out.complete = True
+        elif _near_sentinel(n):
+            out.near_misses.append(_sentinel_problem(n))
         elif (v := _value(n, "VERDICT:")) is not None:
             if out.verdict is None:
                 out.verdict = v
         elif (v := _value(n, "SCOPE:")) is not None:
+            if not v:
+                # SCOPE written as a list under the label: take the items up to the next blank line or directive.
+                items = []
+                while i < len(header) and header[i].strip() and not normalize(header[i]).startswith(_DIRECTIVE_PREFIXES):
+                    items.append(normalize(header[i]))
+                    i += 1
+                v = ", ".join(x for x in items if x)
+            if not v:
+                out.near_misses.append("SCOPE: was empty; write the requirement ids and phases on the same line, or SCOPE: none")
+                continue
             out.scope_text = v
             out.scope_none = v.strip().lower().rstrip(".") in ("none", "n/a", "-", "nothing")
             out.scope = set() if out.scope_none else scope_tokens(v)
@@ -379,13 +407,23 @@ def parse_builder(text: str, *, now: datetime, phase_pattern: re.Pattern[str]) -
     start = next((i for i, ln in enumerate(lines) if normalize(ln).upper().startswith("DECISIONS NEEDED")), None)
     if start is not None:
         inline = normalize(lines[start]).split(":", 1)[1].strip() if ":" in lines[start] else ""
-        if inline and inline.lower().rstrip(".") not in ("none", "n/a"):
+        none = inline.lower().rstrip(".") in ("none", "n/a", "no", "nothing")
+        if inline and not none:
             sig.decisions_needed.append(inline)
-        for line in lines[start + 1 :]:
-            n = normalize(line)
-            if n.upper().startswith(("PROCEEDING", "WAIT ")):
-                break
-            if m := _ITEM.match(line):
-                sig.decisions_needed.append(m.group(1).strip())
+        if not none:
+            # The list right under the label only: it ends at the first blank line after an item, a heading,
+            # a non-item line, or PROCEEDING / WAIT.
+            for line in lines[start + 1 :]:
+                n = normalize(line)
+                if n.upper().startswith(("PROCEEDING", "WAIT ")) or line.lstrip().startswith("#"):
+                    break
+                if not line.strip():
+                    if sig.decisions_needed:
+                        break
+                    continue
+                if m := _ITEM.match(line):
+                    sig.decisions_needed.append(m.group(1).strip())
+                elif not line.startswith((" ", "\t")):
+                    break
     sig.phase_claims = [m.group(0) for m in phase_pattern.finditer(text)]
     return sig

@@ -194,7 +194,8 @@ def _in_exit_list(text: str, offset: int) -> bool:
     line = text[:offset].count("\n")
     for i in range(line, -1, -1):
         if _HEADING.match(lines[i]) and i != line:
-            return False
+            # Criteria listed under an "### Exit criteria" heading count as much as under an "Exit criteria:" label.
+            return bool(_EXIT.search(lines[i]))
         if _EXIT.search(lines[i]):
             return True
     return False
@@ -211,6 +212,10 @@ def assess(cfg: Config, edits: list[Edit], planner_material: bool | None) -> Ass
         if path in rules:
             result.material = True
             result.reasons.append(f"{edit.path}: the project rules are part of the contract")
+            continue
+        if path == cfg.path.resolve():
+            result.material = True
+            result.reasons.append(f"{edit.path}: the run configuration is part of the contract")
             continue
         if path != prd:
             continue
@@ -248,9 +253,34 @@ _STATUS_LINE = re.compile(r"^-\s*Status:.*$", re.MULTILINE)
 
 def _read(path: Path) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return ""
+
+
+_PROTECTED = re.compile(r"^\W*(?:Status|Decided by)\s*:", re.IGNORECASE)
+_OWNER_CLAIM = re.compile(r"OWNER DECISION|(?:approved|rejected|decided|accepted)\s+by\s+the\s+owner", re.IGNORECASE)
+
+
+def protected_line_errors(name: str, original: str, new: str, *, may_change_status: bool) -> list[str]:
+    """The planner may add to the ledger and the open items, but never rewrite who decided what (DESIGN 6.5).
+
+    Every Status / Decided by line that exists must survive unchanged (unless the owner's own decisions are being
+    applied to open items), and no new one may claim the owner's approval."""
+    errors = []
+    before = [ln.strip() for ln in original.splitlines() if _PROTECTED.match(ln)]
+    after = [ln.strip() for ln in new.splitlines() if _PROTECTED.match(ln)]
+    if not may_change_status:
+        remaining = list(after)
+        for ln in before:
+            if ln in remaining:
+                remaining.remove(ln)
+            else:
+                errors.append(f"{name}: the planner may add entries, but not change or remove an existing line: {ln!r}")
+    for ln in after:
+        if ln not in before and _OWNER_CLAIM.search(ln):
+            errors.append(f"{name}: the planner cannot claim the owner's decision: {ln!r}")
+    return errors
 
 
 def _next(pattern: re.Pattern[str], text: str) -> int:
@@ -288,7 +318,8 @@ def set_decision_status(path: Path, dec: str, status: str) -> bool:
     end = m.end() + (nxt.start() if nxt else len(text) - m.end())
     section = text[m.end() : end]
     if _STATUS_LINE.search(section):
-        section = _STATUS_LINE.sub(f"- Status: {status}", section, count=1)
+        # A function, not a template: owner text such as `\d+` in a rejection reason must stay literal.
+        section = _STATUS_LINE.sub(lambda m: f"- Status: {status}", section, count=1)
     else:
         section = f"\n- Status: {status}" + section
     atomic_write_text(path, text[: m.end()] + section + text[end:])

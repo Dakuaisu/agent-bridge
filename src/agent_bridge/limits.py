@@ -18,8 +18,16 @@ AUTH_PATTERNS = [
     r"invalid x-api-key",
     r"authentication_error",
     r"\bnot logged in\b",
-    r"\b401\b",
+    # A bare "401" is too common ("line 401"): only an HTTP status, or 401 next to an auth word, counts.
+    r"(?:http|status|error|code)\D{0,12}\b401\b",
+    r"\b401\b(?=[^\n]{0,40}(?:unauthori[sz]ed|authenticat|invalid|token|credential|log ?in))",
     r"\binvalid_grant\b",
+]
+BILLING_PATTERNS = [
+    r"credit balance is too low",
+    r"insufficient (?:credit|credits|balance|funds|quota)",
+    r"billing (?:error|issue|problem)",
+    r"payment required",
 ]
 SESSION_LIMIT_PATTERNS = [
     r"hit your (?:\w+[ -])?limit",
@@ -33,6 +41,7 @@ SESSION_LIMIT_PATTERNS = [
 RATE_PATTERNS = [r"\b429\b", r"rate[ _-]?limit", r"overloaded", r"\b529\b", r"too many requests"]
 
 _AUTH = re.compile("|".join(AUTH_PATTERNS), re.IGNORECASE)
+_BILLING = re.compile("|".join(BILLING_PATTERNS), re.IGNORECASE)
 _SESSION = re.compile("|".join(SESSION_LIMIT_PATTERNS), re.IGNORECASE)
 _RATE = re.compile("|".join(RATE_PATTERNS), re.IGNORECASE)
 
@@ -116,9 +125,11 @@ def _clock_reset(m: re.Match[str], now: datetime) -> datetime | None:
 
 
 def classify(text: str) -> str:
-    """'auth', 'session_limit', 'rate_limited' or 'other'. Auth wins: a dead login looks like nothing else."""
+    """'auth', 'billing', 'session_limit', 'rate_limited' or 'other'. Auth wins: a dead login looks like nothing else."""
     if _AUTH.search(text):
         return "auth"
+    if _BILLING.search(text):
+        return "billing"
     if _SESSION.search(text):
         return "session_limit"
     if _RATE.search(text):

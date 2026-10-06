@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from agent_bridge import contract, owner
+from agent_bridge import contract, owner, sandbox
 from agent_bridge.backends.base import READ_ONLY_BY_INSTRUCTION, READ_ONLY_ENFORCED
 from agent_bridge.config import CONFIG_NAME, ROLES, Config, ConfigError, load_config
 from agent_bridge.engine import State
@@ -168,6 +168,10 @@ def stream_line(e: dict[str, Any]) -> Line | None:
         return Line(ts, "bridge", "note", kind, one_line(e.get("reason", "")))
     if kind == "launch":
         return Line(ts, "bridge", "launch", "agent-bridge " + " ".join(e.get("argv") or []))
+    if kind == "verify":
+        code = e.get("exit")
+        result = "passed" if code == 0 else "timed out" if code is None else f"failed (exit {code})"
+        return Line(ts, "bridge", "good" if code == 0 else "bad", f"verify {result}", f"{e.get('seconds')}s")
     return None
 
 
@@ -197,6 +201,7 @@ class RoleView:
     active: bool = False
     since: datetime | None = None
     doing: str = ""
+    guard: str = ""
 
 
 @dataclass
@@ -403,7 +408,7 @@ class ProjectWatcher:
         if st.phase == "PLAN_REVIEW":
             plan = self.sd.plan / "plan.md"
             if self._changed("plan", plan):
-                self._cache["plan"] = plan.read_text(encoding="utf-8") if plan.exists() else ""
+                self._cache["plan"] = plan.read_text(encoding="utf-8", errors="replace") if plan.exists() else ""
             snap.plan_summary = self._cache.get("plan", "")
         return snap
 
@@ -425,7 +430,7 @@ class ProjectWatcher:
         snap.drift = self._cache.get("drift", [])
         if self._changed("phases", self.sd.state, p.prd):
             try:
-                text = p.prd.read_text(encoding="utf-8")
+                text = p.prd.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 text = ""
             self._cache["phases"] = phase_track(text, st)
@@ -447,8 +452,10 @@ class ProjectWatcher:
         out = {}
         for role in ROLES:
             rc = cfg.role(role)
+            guard = ""
             if role == "builder":
                 read_only = "writes"
+                guard = "sandboxed" if rc.engine == "claude-code" and sandbox.applies(cfg.safety.sandbox) else "not sandboxed"
             else:
                 read_only = READ_ONLY_ENFORCED if rc.engine == "claude-code" else READ_ONLY_BY_INSTRUCTION
             session = st.sessions.get(role) or {}
@@ -464,6 +471,7 @@ class ProjectWatcher:
                 active=role == active,
                 since=since if role == active else None,
                 doing=self._doing.get(role, "") if role == active else "",
+                guard=guard,
             )
         return out
 

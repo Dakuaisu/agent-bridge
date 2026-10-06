@@ -36,6 +36,7 @@ class FakeStep:
     commit: str | None = None
     events: list[Event] = field(default_factory=list)
     action: Callable[[], None] | None = None
+    cost_usd: float | None = None
 
 
 Step = Union[FakeStep, str, BackendError]
@@ -141,4 +142,5 @@ class FakeBackend(Backend):
             context_tokens=step.context_tokens,
             duration_s=step.advance,
             raw_path=raw_path,
+            cost_usd=step.cost_usd,
         )

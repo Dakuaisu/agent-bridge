@@ -132,6 +132,7 @@ class App:
         self.rows: list[ProjectRow] = []
         self._rows_at = 0.0
         self._refresh_at = 0.0
+        self._error_at = 0.0
         self.starting_until = 0.0
         self.open(self.here)
         self.home_root = self.snap.root
@@ -172,17 +173,38 @@ class App:
     def tick(self) -> None:
         now = time.monotonic()
         if now >= self._refresh_at:
-            self.snap = self.watcher.refresh()
             self._refresh_at = now + 0.4
+            try:
+                self.snap = self.watcher.refresh()
+            except Exception as e:  # noqa: BLE001 - a bad file must not take the view down
+                self._read_error(e)
         for job in self.runner.poll():
             self.finished(job)
         if self.screen == "projects" and now >= self._rows_at:
-            self.rows = self.project_rows()
             self._rows_at = now + 1.5
+            try:
+                self.rows = self.project_rows()
+            except Exception as e:  # noqa: BLE001
+                self._read_error(e)
         self.toast_items = [t for t in self.toast_items if t[2] > now]
         self.view.jobs = [j.label for j in self.runner.busy()]
         self.view.toasts = [(t[0], t[1]) for t in self.toast_items]
         self.view.starting = now < self.starting_until
+
+    def _read_error(self, e: Exception) -> None:
+        now = time.monotonic()
+        if now >= self._error_at:
+            self._error_at = now + 30
+            self.toast(f"✗ could not read the project: {type(e).__name__}: {e}", "bad", 10)
+
+    def paste(self, text: str) -> None:
+        """A burst of typed characters (a paste) goes into the focused text field as text: a tab or a newline in it
+        must not move the focus or submit the form."""
+        self.dirty = True
+        if self.modals and hasattr(self.modals[-1], "paste") and self.modals[-1].paste(text):
+            return
+        for ch in text:
+            self.key(keyname(ch))
 
     def animating(self) -> bool:
         return bool(time.monotonic() < self.splash_until or self.snap.holder or self.runner.jobs or self.toast_items or self.rows and any(r.holder for r in self.rows))
@@ -788,7 +810,7 @@ class App:
         def events() -> str:
             from agent_bridge.journal import read_events
 
-            records = read_events(sd.events)[-3000:] if sd.events.exists() else []
+            records = read_events(sd.events, tail_bytes=3_000_000)[-3000:] if sd.events.exists() else []
             return "\n".join(line for e in records if (line := render_event(e)))
 
         tabs = [
@@ -1128,7 +1150,11 @@ def _run_editor(screen: Screen, app: App) -> None:
     assert app.editor is not None
     kind, target, then = app.editor
     app.editor = None
-    command = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano")
+    try:
+        command = shlex.split(os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano") or ["nano"]
+    except ValueError as e:
+        app.toast(f"$EDITOR is not a command the shell could run ({e}); fix it, then try again", "bad", 10)
+        return
     tmp = None
     if kind == "text":
         fd, name = tempfile.mkstemp(prefix="agent-bridge-", suffix=".md")
@@ -1153,6 +1179,28 @@ def _run_editor(screen: Screen, app: App) -> None:
         tmp.unlink(missing_ok=True)
     elif then:
         then()
+
+
+def _bursts(keys: list[str | int]) -> list[str | int | tuple[str, str]]:
+    """Runs of three or more text characters read in one go (a paste) become one ("paste", text) item."""
+    out: list[str | int | tuple[str, str]] = []
+    run: list[str] = []
+
+    def flush() -> None:
+        if len(run) >= 3:
+            out.append(("paste", "".join(run)))
+        else:
+            out.extend(run)
+        run.clear()
+
+    for k in keys:
+        if isinstance(k, str) and (k.isprintable() or k in ("\t", "\n", "\r")) and len(k) == 1:
+            run.append(k)
+        else:
+            flush()
+            out.append(k)
+    flush()
+    return out
 
 
 def loop(stdscr: Any, app: App) -> None:
@@ -1184,13 +1232,18 @@ def loop(stdscr: Any, app: App) -> None:
             continue
         keys = [k]
         stdscr.timeout(0)
-        while len(keys) < 512:
+        while len(keys) < 65536:
             more = _read_key(stdscr)
             if more is None:
                 break
             keys.append(more)
         stdscr.timeout(40)
-        for raw in keys:
+        for raw in _bursts(keys):
+            if isinstance(raw, tuple):
+                app.paste(raw[1])
+                if app.editor:
+                    _run_editor(screen, app)
+                continue
             name = keyname(raw)
             if name == "resize":
                 curses.update_lines_cols()
@@ -1207,7 +1260,16 @@ def loop(stdscr: Any, app: App) -> None:
 
 
 def run_tui(folder: Path | None = None, *, show_all: bool = False) -> int:
-    locale.setlocale(locale.LC_ALL, "")
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        # LANG names a locale this machine lacks; fall back rather than refuse to start.
+        for name in ("C.UTF-8", "en_US.UTF-8", "C"):
+            try:
+                locale.setlocale(locale.LC_ALL, name)
+                break
+            except locale.Error:
+                continue
     os.environ.setdefault("ESCDELAY", "25")
     holder: dict[str, App] = {}
 

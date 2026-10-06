@@ -23,6 +23,7 @@ def isolated_state_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: p
     """The project registry and neutral role folders live under XDG_STATE_HOME; never the owner's."""
     state = tmp_path_factory.mktemp("state")
     monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    monkeypatch.setenv("AGENT_BRIDGE_NO_NOTIFY", "1")
     return state
 
 

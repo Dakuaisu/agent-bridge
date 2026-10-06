@@ -47,3 +47,21 @@ Status: OPEN, OWNER-BLOCKED or RESOLVED.
   working directory. It needs the owner present.
 - Next (owner): commit or stash the work in `~/src/opencode-claude-bridge`, run
   `scripts/smoke.sh opencode`, then check that repo with `git status`.
+
+## OPEN-004 The opencode builder is not sandboxed
+- Status: OPEN
+- What: `safety.sandbox` applies to a Claude Code builder only.
+- Why it waits:
+  - opencode runs tools inside its long-lived `opencode serve`, which is shared by the project's roles
+    and often started outside the bridge.
+  - Sandboxing it means starting the server under `sandbox-exec` with an allow-list for opencode's own
+    state, and verifying that live. Live opencode tests wait for the owner (OPEN-003).
+- Until then: on opencode, writes outside the repo are detected after the turn (DESIGN 8.4), not
+  prevented.
+
+## OPEN-005 Two engine behaviours not yet seen live
+- Status: OPEN
+- Claude Code subagent messages are recognised by `parent_tool_use_id`. The format comes from the
+  SDK; no live run with a Task subagent has confirmed it yet.
+- The `git push` deny (`permissions.deny: Bash(git push:*)`) under `bypassPermissions` is configured but
+  untested live. Remote refs are compared after every builder turn either way.

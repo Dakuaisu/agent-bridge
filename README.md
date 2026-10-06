@@ -148,6 +148,25 @@ Everything lives in `.bridge/`: `loop.log` holds every message as delivered,
 `review.log` holds the warnings, and `state.json` lets a stopped run resume where it
 left off.
 
+## Evidence, alerts and limits for unattended runs
+
+Optional settings in `bridge.toml`; each is in the template that `init` writes:
+
+- `[project] verify = "make test"`: the bridge runs it after every builder turn and shows
+  the supervisor the exit code and the last lines. Its "tests pass" then rests on a run
+  the agents did not report themselves. Owner-only: a plan change cannot set it.
+- `[notify]`: a macOS notification (on by default) and/or your own `command`, when a run
+  pauses, completes, or needs you. The command gets `AGENT_BRIDGE_EVENT`, `_TITLE`,
+  `_MESSAGE`, `_PROJECT` and `_REPO`. For example, curl to ntfy.sh for your phone.
+- `[budget] max_cost_usd`: pauses a run once its turns add up to this much at the engines'
+  API prices. `status` and the report show the running total.
+- `[safety] sandbox`: `auto` (the default) sandboxes a Claude Code builder on macOS;
+  `sandbox_writable` adds folders it may write to.
+
+Logs over 64 MB rotate when a run starts (`events.jsonl.1`, …). Ctrl-C, closing the
+terminal, or SIGTERM ends the running agent with the bridge, and `agent-bridge run`
+resends the interrupted turn.
+
 ## Billing
 
 - **Claude Code roles bill your Claude subscription (the Max plan).** By default
@@ -164,10 +183,12 @@ left off.
 ## Known limitations
 
 - **Read-only on opencode is by instruction only.** It is audited, not enforced.
-- **The builder can still act outside the repo.** A builder write under your home folder
-  outside the repo pauses the run, but only after the turn: the bridge sees tool calls
-  once they ran. This was found live (INVENTORY L22). The fix is tested with fakes only;
-  a live opencode re-check is OPEN-003.
+- **Only the Claude Code builder is sandboxed.** On macOS it may write only inside the
+  repo, the temp folders and the tools' own state (`safety.sandbox`, verified live). An
+  opencode builder is not sandboxed (OPEN-004). There, a write outside the repo is caught
+  after the turn and pauses the run. That covers absolute paths, `~`, `$HOME`, `cd` and
+  `git -C`. A relative path that a tool resolved in another folder shows up only as "the
+  builder wrote, but the repo did not change" (INVENTORY L22, OPEN-003).
 - **Commit trailers are detected, not prevented.** In the final smoke test a Haiku
   builder added `Co-Authored-By` despite the rules; the bridge logged `COMMIT
   ATTRIBUTION`. Nothing rewrites history.

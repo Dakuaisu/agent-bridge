@@ -261,3 +261,27 @@ The owner migrated FillingQA with the terminal UI. The check found four gaps:
 - **The results register surprise** is documented in MIGRATION.md, not changed. The
   supervisor's reading, that numbers already published need rows, is a fair reading of
   the contract.
+
+## DEC-020 Hardening after the 2026-10-06 audit
+- Decided by: build agent (2026-10-06, at the owner's request)
+- Status: AUTONOMOUS DECISION - owner to review
+
+An outside audit reproduced 12 bugs and listed gaps and improvements. Each was confirmed with the auditor's
+probes before it was fixed (DESIGN 8.4, `tests/test_audit.py`). The choices worth reviewing:
+- **Ending the agent.** On any interrupt, the agent's whole process group is ended, including background
+  jobs it started during that turn. This is the same as a timeout already did. A long job meant to
+  outlive a turn must be started in its own session (`setsid` or `nohup … &` from a detached shell).
+- **The leftover check** ends a process only when both its pid and its start time match the record, so a
+  reused pid is never touched.
+- **The sandbox** is on by default (`safety.sandbox = "auto"`) for a Claude Code builder on macOS.
+  - Options were Claude Code's own sandbox setting, which covers only its Bash tool, or `sandbox-exec`
+    around the whole process (chosen: it also covers Write, Edit and every child process).
+  - The allow-list is generous for tool state (`~/.claude`, caches, `~/.docker`, `~/.gnupg`, …).
+  - A project that needs more lists it in `sandbox_writable`; `off` is an owner-only setting.
+- **The wrote-elsewhere check** adds a note for the supervisor and does not pause the run. Writes to
+  ignored files, or a commit with nothing to commit, would raise false alarms.
+- **Near-misses** get one nudge and are then taken as parsed, with a `review.log` entry. They are never
+  accepted silently, and the run never pauses for them.
+- **The cost figures** are each engine's API-price estimate. On a subscription they are a usage proxy,
+  not a bill, and the cap is per `run`, like the other budget caps.
+- **Notifications** are on by default on macOS. Tests switch them off with `AGENT_BRIDGE_NO_NOTIFY=1`.

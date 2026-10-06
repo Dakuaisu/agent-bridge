@@ -442,3 +442,88 @@ def test_setup_leaves_legacy_state_alone_by_default_and_records_phases(tmp_path:
     type_text(app, "WORKLOG 2026-10-01")
     app.key("ctrl-s")
     assert last_argv(app) == ["approve", "--done", "Phase 2", "--reason", "WORKLOG 2026-10-01", "--repo", str(app.repo)]
+
+
+def _frame_rows(text: list[str], title: str) -> tuple[int, int, int, int]:
+    top = next(i for i, line in enumerate(text) if f"─ {title} " in line)
+    left = text[top].index("╭")
+    right = text[top].index("╮", left)
+    bottom = next(i for i in range(top + 1, len(text)) if len(text[i]) > left and text[i][left] == "╰")
+    return top, bottom, left, right
+
+
+@pytest.mark.parametrize(("scene", "key", "title", "button"), [("blank", "n", "NEW PROJECT", "Create"), ("interview", "i", "THE PLANNER ASKS", "Send answers")])
+def test_forms_fit_inside_their_frame_at_the_minimum_size(tmp_path: Path, scene: str, key: str, title: str, button: str) -> None:
+    folder = S.blank(tmp_path) if scene == "blank" else S.interview(tmp_path)
+    app = app_for(folder)
+    app.key(key)
+    text = app.render(16, 60).text()
+    top, bottom, left, right = _frame_rows(text, title)
+    assert set(text[bottom][left + 1 : right]) == {"─"}, "something was drawn over the frame's bottom edge"
+    assert any(button in line for line in text[top:bottom])
+    assert all(len(line) <= 60 for line in text)
+
+
+def test_a_paste_is_text_even_with_tabs_and_newlines(tmp_path: Path) -> None:
+    from agent_bridge.tui.app import _bursts
+
+    repo, _ = S.running(tmp_path, hold_lock=False)
+    app = app_for(repo)
+    app.key("m")
+    form = app.modals[-1]
+    app.paste("line one\n\tline two")
+    assert app.modals[-1] is form and form.fields[1].value == "line one\n    line two"
+    assert _bursts(["a", "b", "c", "\t", "x", 259, "y"]) == [("paste", "abc\tx"), 259, "y"]
+
+
+def test_scrollback_stays_on_the_same_lines_while_new_ones_arrive() -> None:
+    from agent_bridge.tui.draw import View, stream
+    from agent_bridge.tui.model import Line, Snapshot
+
+    lines = [Line("2026-10-06T12:00:00+05:30", "builder", "text", f"line {i}") for i in range(50)]
+    snap = Snapshot(folder=Path("/x"), repo=None, root=Path("/x"), name="x", configured=True, lines=lines)
+    view = View(scroll=5)
+    stream(Canvas(20, 80), 0, 0, 20, 80, snap, view, True)
+    snap.lines = lines + [Line("2026-10-06T12:00:01+05:30", "builder", "text", f"new {i}") for i in range(3)]
+    stream(Canvas(20, 80), 0, 0, 20, 80, snap, view, True)
+    assert view.scroll == 8
+
+
+def test_a_bad_editor_or_a_failing_refresh_is_a_message_not_a_crash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_bridge.tui.app import _run_editor
+
+    repo, _ = S.running(tmp_path, hold_lock=False)
+    app = app_for(repo)
+    monkeypatch.setenv("EDITOR", 'vim "unbalanced')
+    monkeypatch.delenv("VISUAL", raising=False)
+    app.edit_text("x", lambda text: None)
+    _run_editor(None, app)  # type: ignore[arg-type]
+    assert "$EDITOR is not a command" in app.toast_items[-1][0]
+
+    def broken() -> None:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad byte")
+
+    app.watcher.refresh = broken  # type: ignore[method-assign]
+    app._refresh_at = 0.0
+    app.tick()
+    assert "could not read the project" in app.toast_items[-1][0]
+
+
+def test_an_invalid_locale_does_not_stop_the_ui(monkeypatch: pytest.MonkeyPatch) -> None:
+    import curses
+    import locale
+
+    from agent_bridge.tui import app as tui_app
+
+    calls: list[str] = []
+
+    def setlocale(category: int, name: str = "") -> str:
+        calls.append(name)
+        if name == "":
+            raise locale.Error("unsupported locale setting")
+        return name
+
+    monkeypatch.setattr(locale, "setlocale", setlocale)
+    monkeypatch.setattr(curses, "wrapper", lambda body: None)
+    assert tui_app.run_tui(Path.cwd()) == 0
+    assert calls[:2] == ["", "C.UTF-8"]

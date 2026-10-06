@@ -44,7 +44,7 @@ def parse_wait_line(line: str, *, now: datetime) -> WaitSpec:
     if m := _PID.match(text):
         return WaitSpec("pid", m.group(1), max_seconds)
     if m := _FILE.match(text):
-        path = m.group(1).strip().strip("'\"`")
+        path = _first_path(m.group(1).strip())
         if not path:
             raise ValueError("WAIT FOR FILE needs a path")
         return WaitSpec("file", path, max_seconds)
@@ -52,6 +52,16 @@ def parse_wait_line(line: str, *, now: datetime) -> WaitSpec:
         when = _parse_time(m.group(1).strip().strip("'\"`"), now)
         return WaitSpec("until", when.isoformat(timespec="seconds"), max_seconds)
     raise ValueError(f"not a WAIT directive: {line!r} (use WAIT UNTIL <ISO time>, WAIT FOR PID <n> or WAIT FOR FILE <path>)")
+
+
+def _first_path(text: str) -> str:
+    """The path, without a note after it: "(why)", ", then ..." or " - why". A quoted path is taken as written."""
+    if text[:1] in ("'", '"', "`"):
+        end = text.find(text[0], 1)
+        return text[1:end] if end > 0 else text[1:]
+    text = re.sub(r"\s+\(.*\)\s*$", "", text)
+    text = re.split(r",\s|;\s|\s+(?:-{1,2}|—|–)\s+", text, maxsplit=1)[0]
+    return text.strip().rstrip(",;.")
 
 
 def _parse_time(text: str, now: datetime) -> datetime:

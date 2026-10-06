@@ -110,6 +110,11 @@ class Repo:
             paths.update(p for p in self.out("diff", "--name-only", span).splitlines() if p)
         return sorted(paths)
 
+    def diff_summary(self, before: str, after: str, files: int = 12) -> str:
+        """Which files the new commits touched, from git's own --stat, capped for the supervisor's message."""
+        out = self.out("diff", "--stat=100,70", f"--stat-count={files}", before, after).rstrip()
+        return "\n".join(f"  {line.strip()}" for line in out.splitlines()) if out else ""
+
     def new_commits(self, before: str | None, after: str | None) -> list[CommitInfo]:
         if not after or before == after:
             return []

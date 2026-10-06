@@ -77,7 +77,7 @@ class Linker:
 def parse_results(path: Path) -> tuple[list[dict[str, str]], str | None]:
     """Rows of the results register; the second value explains a missing or unreadable register."""
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return [], f"there is no results register ({path.name} does not exist)"
     rows: list[dict[str, str]] = []
@@ -107,7 +107,7 @@ def _col(row: dict[str, str], *names: str) -> str:
 
 def review_entries(path: Path, since: str | None) -> list[tuple[str, str]]:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return []
     cutoff = since[:19].replace("T", " ") if since else ""
@@ -142,8 +142,15 @@ def render_report(cfg: Config, sd: StateDir, state: Any, *, now: datetime, repor
         lines.append("- Contract: not approved")
     for done in state.phases_done:
         dec = f", {done['dec']}" if done.get("dec") else ""
-        lines.append(f"- {done['phase']}: verified complete by the supervisor at exchange {done['exchange']} ({done['at']}{dec})")
+        if done.get("by") == "owner":
+            lines.append(f"- {done['phase']}: recorded as complete by the owner, finished before agent-bridge ({done['at']}{dec})")
+        else:
+            lines.append(f"- {done['phase']}: verified complete by the supervisor at exchange {done['exchange']} ({done['at']}{dec})")
     lines.append(f"- Exchanges: {state.exchange}")
+    usage = getattr(state, "usage", None) or {}
+    if usage.get("turns"):
+        cost = f"${usage['cost_usd']:.2f} at API prices" if "cost_usd" in usage else "cost not reported by the engines"
+        lines.append(f"- Usage: {usage['turns']} agent turns, {cost} (on a subscription this is not what is billed)")
     if first:
         started = datetime.fromisoformat(first)
         lines.append(f"- Wall time since the first launch: {format_duration(int((now - started).total_seconds()))} (from {first})")

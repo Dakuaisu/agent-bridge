@@ -35,6 +35,18 @@ class MonitorStop(Exception):
         self.error = error
 
 
+def end_child(proc: subprocess.Popen[str]) -> None:
+    """End the child's group on the way out of an interrupted turn; a second Ctrl-C skips the grace period."""
+    try:
+        kill_group(proc, grace=5.0)
+    except BaseException:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        raise
+
+
 def kill_group(proc: subprocess.Popen[str], grace: float = 10.0) -> None:
     try:
         pgid = os.getpgid(proc.pid)
@@ -66,6 +78,7 @@ def run_streaming(
     stall_after: float = 1800.0,
     on_stall: Callable[[float], None] | None = None,
     poll: float = 0.25,
+    on_start: Callable[[subprocess.Popen[str]], None] | None = None,
 ) -> StreamResult:
     proc = subprocess.Popen(
         cmd,
@@ -78,6 +91,8 @@ def run_streaming(
         bufsize=1,
         start_new_session=True,
     )
+    if on_start is not None:
+        on_start(proc)
     lines: queue.Queue[str | None] = queue.Queue()
     err_chunks: list[str] = []
 
@@ -136,8 +151,10 @@ def run_streaming(
             if on_stall is not None and not result.stalled_warned and now - last_output > stall_after:
                 result.stalled_warned = True
                 on_stall(now - last_output)
-    except MonitorStop:
-        kill_group(proc)
+    except BaseException:
+        # Ctrl-C, SIGTERM (turned into KeyboardInterrupt), a monitor stop or a parser error: the agent must not
+        # outlive its turn, or a resent turn would run beside it.
+        end_child(proc)
         raise
     if result.cancelled or result.timed_out:
         kill_group(proc)

@@ -10,6 +10,7 @@ from agent_bridge.tui import theme as T
 from agent_bridge.tui.canvas import Canvas
 from agent_bridge.tui.draw import parts
 from agent_bridge.tui.text import clip, one_line, pad, width, wrap
+from agent_bridge.tui.text import width as width_of
 from agent_bridge.tui.theme import Style
 from agent_bridge.tui.widgets import LineEdit, ListState, TextArea
 
@@ -65,6 +66,8 @@ def hints(cv: Canvas, y: int, x: int, items: list[tuple[str, str]], max_x: int) 
 class Field:
     focusable = True
     wide = False
+    min_rows = 1
+    limit: int | None = None  # rows the form can give this field right now
 
     def __init__(self, label: str = "", when: Callable[[], bool] | None = None) -> None:
         self.label = label
@@ -107,6 +110,8 @@ class LineField(Field):
 
 
 class TextField(Field):
+    min_rows = 2
+
     def __init__(self, label: str, value: str = "", rows: int = 5, placeholder: str = "", when: Callable[[], bool] | None = None) -> None:
         super().__init__(label, when)
         self.area = TextArea(value, placeholder)
@@ -120,20 +125,21 @@ class TextField(Field):
         return self.n
 
     def draw(self, cv: Canvas, y: int, x: int, w: int, focused: bool, t: float) -> tuple[int, int] | None:
+        n = self.limit or self.n
         bg = 239 if focused else T.FIELD_BG
-        cv.fill(y, x, self.n, w, Style(T.DEFAULT, bg))
+        cv.fill(y, x, n, w, Style(T.DEFAULT, bg))
         a = self.area
         a.cols = max(4, w - 3)
         if not a.text and a.placeholder:
-            for i, line in enumerate(wrap(a.placeholder, a.cols)[: self.n]):
+            for i, line in enumerate(wrap(a.placeholder, a.cols)[:n]):
                 cv.put(y + i, x + 1, line, Style(243, bg))
-        a.scroll_to_cursor(self.n)
+        a.scroll_to_cursor(n)
         rows = a.visual()
-        for i, (li, s, e) in enumerate(rows[a.top : a.top + self.n]):
+        for i, (li, s, e) in enumerate(rows[a.top : a.top + n]):
             cv.put(y + i, x + 1, a.lines[li][s:e], Style(255, bg))
-        if len(rows) > self.n:
-            frac = a.top / max(1, len(rows) - self.n)
-            cv.put(y + int(frac * (self.n - 1)), x + w - 1, "▐", Style(245, bg))
+        if len(rows) > n:
+            frac = a.top / max(1, len(rows) - n)
+            cv.put(y + int(frac * (n - 1)), x + w - 1, "▐", Style(245, bg))
         if not focused:
             return None
         v, c = a.cursor()
@@ -216,6 +222,7 @@ class DocField(Field):
     """Read-only scrolling text inside a form, such as the planner's questions."""
 
     wide = True
+    min_rows = 3
 
     def __init__(self, text: str, rows: int = 10) -> None:
         super().__init__("")
@@ -228,24 +235,26 @@ class DocField(Field):
         return self.n
 
     def draw(self, cv: Canvas, y: int, x: int, w: int, focused: bool, t: float) -> tuple[int, int] | None:
+        n = self.limit or self.n
         self._lines = wrap(self.text, w - 2)
-        self.top = max(0, min(self.top, len(self._lines) - self.n))
-        cv.fill(y, x, self.n, w, Style(T.DEFAULT, 233))
-        for i, line in enumerate(self._lines[self.top : self.top + self.n]):
+        self.top = max(0, min(self.top, len(self._lines) - n))
+        cv.fill(y, x, n, w, Style(T.DEFAULT, 233))
+        for i, line in enumerate(self._lines[self.top : self.top + n]):
             style = Style(87, 233, bold=True) if line[:1].isdigit() else Style(252, 233)
             if line.lstrip().startswith(("Recommended:", "Why it matters:")):
                 style = Style(141, 233) if "Recommended" in line else Style(245, 233)
             cv.put(y + i, x + 1, line, style)
-        if len(self._lines) > self.n:
-            frac = self.top / max(1, len(self._lines) - self.n)
-            cv.put(y + int(frac * (self.n - 1)), x + w - 1, "▐", Style(87 if focused else 240, 233))
+        if len(self._lines) > n:
+            frac = self.top / max(1, len(self._lines) - n)
+            cv.put(y + int(frac * (n - 1)), x + w - 1, "▐", Style(87 if focused else 240, 233))
         return None
 
     def key(self, name: str) -> bool:
-        step = {"up": -1, "down": 1, "pgup": -self.n + 1, "pgdn": self.n - 1}.get(name)
+        n = self.limit or self.n
+        step = {"up": -1, "down": 1, "pgup": -n + 1, "pgdn": n - 1}.get(name)
         if step is None:
             return False
-        limit = max(0, len(self._lines) - self.n)
+        limit = max(0, len(self._lines) - n)
         new = max(0, min(limit, self.top + step))
         if new == self.top:
             return False
@@ -283,6 +292,7 @@ class Form(Modal):
         self.focus = focus
         self.error = ""
         self.submit_hint = submit_hint or buttons[0].label.lower()
+        self.scroll = 0
 
     def items(self) -> list[Field | int]:
         out: list[Field | int] = [f for f in self.fields if f.visible() and f.focusable]
@@ -293,36 +303,101 @@ class Form(Modal):
         self.focus = max(0, min(self.focus, len(items) - 1))
         return items[self.focus]
 
+    def _button_rows(self, width: int, cur: Field | int) -> list[list[tuple[int, str, Style]]]:
+        rows: list[list[tuple[int, str, Style]]] = [[]]
+        used = 0
+        for i, b in enumerate(self.buttons):
+            text, style = button_part(b.label, cur == i, b.tone if i else "primary", self.accent)
+            need = width_of(text) + (2 if rows[-1] else 0)
+            if rows[-1] and used + need > width:
+                rows.append([])
+                used, need = 0, width_of(text)
+            rows[-1].append((i, text, style))
+            used += need
+        return rows
+
     def draw(self, cv: Canvas, app: App, t: float) -> None:
         scrim(cv)
         w = min(self.width, cv.w - 4)
-        fw = w - 4 - self.label_w - 1
+        label_w = min(self.label_w, max(6, (w - 4) // 4))
+        fw = w - 4 - label_w - 1
         visible = [f for f in self.fields if f.visible()]
-        body = sum(f.rows(w - 4 if f.wide else fw) for f in visible)
-        spacing = 1 if body + len(visible) * 2 + 8 <= cv.h - 2 else 0
-        h = 2 + 1 + body + spacing * max(0, len(visible) - 1) + (2 if self.error else 0) + 4
-        y, x, h, w = frame(cv, self.title, w, h, self.accent)
         cur = self.current()
-        row = y + 2
+        indent = label_w + 1 if fw >= 24 else 0
+        buttons = self._button_rows(w - 4 - indent, cur)
+        error_rows = 2 if self.error else 0
+        fixed = 2 + 1 + error_rows + 1 + len(buttons) + 1
+        room = max(1, cv.h - 2 - fixed)
+        width = {f: (w - 4 if f.wide else fw) for f in visible}
+        rows = {f: f.rows(width[f]) for f in visible}
+        spacing = 1
+        total = sum(rows.values()) + spacing * max(0, len(visible) - 1)
+        if total > room:
+            spacing = 0
+            total = sum(rows.values())
+        while total > room:
+            shrinkable = [f for f in visible if isinstance(f, (TextField, DocField)) and rows[f] > f.min_rows]
+            if not shrinkable:
+                break
+            biggest = max(shrinkable, key=lambda f: rows[f])
+            rows[biggest] -= 1
+            total -= 1
         for f in visible:
-            fx, fwidth = (x + 2, w - 4) if f.wide else (x + 2 + self.label_w + 1, fw)
+            f.limit = rows[f] if isinstance(f, (TextField, DocField)) else None
+        shown = min(total, room)
+        y, x, h, w = frame(cv, self.title, w, fixed + shown, self.accent)
+        top_of: dict[Field, int] = {}
+        offset = 0
+        for f in visible:
+            top_of[f] = offset
+            offset += rows[f] + spacing
+        if isinstance(cur, Field) and cur in top_of:
+            start, end = top_of[cur], top_of[cur] + rows[cur]
+            if start < self.scroll:
+                self.scroll = start
+            elif end > self.scroll + shown:
+                self.scroll = end - shown
+        elif not isinstance(cur, Field):
+            self.scroll = max(0, total - shown)
+        self.scroll = max(0, min(self.scroll, max(0, total - shown)))
+        body_top = y + 2
+        for f in visible:
+            first = top_of[f] - self.scroll
+            if first < 0 or first + rows[f] > shown:
+                continue
+            row = body_top + first
+            fx = x + 2 if f.wide else x + 2 + label_w + 1
             if not f.wide and f.label and not isinstance(f, ToggleField):
-                focused = f is cur
-                cv.put(row, x + 2, pad(f.label, self.label_w), Style(87, bold=True) if focused else T.DIM)
-            cursor = f.draw(cv, row, fx, fwidth, f is cur, t)
+                cv.put(row, x + 2, pad(f.label, label_w), Style(87, bold=True) if f is cur else T.DIM)
+            cursor = f.draw(cv, row, fx, width[f], f is cur, t)
             if cursor:
                 cv.cursor = cursor
-            row += f.rows(fwidth) + spacing
+        if self.scroll > 0:
+            cv.put(body_top, x + w - 2, "▲", Style(87, T.MODAL_BG))
+        if self.scroll + shown < total:
+            cv.put(body_top + shown - 1, x + w - 2, "▼", Style(87, T.MODAL_BG))
+        row = body_top + shown
         if self.error:
-            for line in wrap(self.error, w - 4)[:1]:
-                cv.put(row, x + 2, "✗ " + line, T.ERR)
-            row += 2
-        by = y + h - 3
-        bx = x + 2 + self.label_w + 1
-        for i, b in enumerate(self.buttons):
-            text, style = button_part(b.label, cur == i, b.tone if i else "primary", self.accent)
-            bx = cv.put(by, bx, text, style) + 2
+            cv.put(row + 1, x + 2, "✗ " + clip(self.error, w - 6), T.ERR)
+            row += error_rows
+        by = row + 1
+        for line in buttons:
+            bx = x + 2 + indent
+            for _, text, style in line:
+                bx = cv.put(by, bx, text, style, x + w - 2) + 2
+            by += 1
         hints(cv, y + h - 2, x + 2, [("ctrl-s", self.submit_hint), ("tab", "next field"), ("esc", "cancel")], x + w - 2)
+
+    def paste(self, text: str) -> bool:
+        cur = self.current()
+        if isinstance(cur, LineField):
+            cur.edit.insert(" ".join(text.replace("\t", " ").splitlines()))
+        elif isinstance(cur, TextField):
+            cur.area.insert(text.replace("\t", "    "))
+        else:
+            return False
+        self.error = ""
+        return True
 
     def key(self, name: str, app: App) -> None:
         cur = self.current()
@@ -656,6 +731,11 @@ class Palette(Modal):
             cv.put(y + h - 2, x + 3, clip("✗ " + why, w - 6), T.WARN)
         else:
             hints(cv, y + h - 2, x + 3, [("⏎", "run"), ("↑↓", "choose"), ("esc", "close")], x + w - 2)
+
+    def paste(self, text: str) -> bool:
+        self.edit.insert(" ".join(text.split()))
+        self.list.index = 0
+        return True
 
     def key(self, name: str, app: App) -> None:
         found = self.matches()

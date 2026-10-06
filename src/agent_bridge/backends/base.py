@@ -40,6 +40,12 @@ class AuthFailed(BackendError):
     retryable = False
 
 
+class BillingFailed(BackendError):
+    """The account cannot pay for the turn (no credit); retrying cannot help."""
+
+    retryable = False
+
+
 class Timeout(BackendError):
     def __init__(self, message: str = "", partial: str = "") -> None:
         super().__init__(message)
@@ -69,6 +75,7 @@ class Capabilities:
     read_only: str
     question_guard: str
     live_attach: str | None = None
+    write_guard: str = ""
 
 
 @dataclass(frozen=True)
@@ -107,6 +114,8 @@ class Reply:
     duration_s: float = 0.0
     raw_path: Path | None = None
     steps: list[str] = field(default_factory=list)
+    cost_usd: float | None = None
+    usage: dict[str, int] = field(default_factory=dict)
 
 
 def select_text(reply: Reply, markers: tuple[str, ...]) -> str:
@@ -144,6 +153,7 @@ class Backend(ABC):
         self._session_id: str | None = None
         self._title = f"{project} {self.role}"
         self.system_prompt: str | None = None
+        self.on_process: Callable[[Any], None] | None = None
 
     @property
     def session_id(self) -> str | None:

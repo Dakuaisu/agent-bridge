@@ -17,6 +17,7 @@ from typing import Any, Callable
 from agent_bridge.backends.base import (
     READ_ONLY_ENFORCED,
     AuthFailed,
+    BillingFailed,
     Backend,
     CancelToken,
     Cancelled,
@@ -31,13 +32,25 @@ from agent_bridge.backends.base import (
     TransientError,
     Unsupported,
 )
-from agent_bridge.backends.proc import run_streaming
+from agent_bridge import sandbox
+from agent_bridge.backends.proc import kill_group, run_streaming
 from agent_bridge.config import RoleConfig
 from agent_bridge.limits import classify, parse_reset
 
 READ_TOOLS = "Read,Grep,Glob"
 STRIP_ALWAYS = ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SSE_PORT")
 STRIP_FOR_SUBSCRIPTION = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
+# These send Claude Code to another endpoint or provider, which bills elsewhere.
+STRIP_CLAUDE_ROUTING = (
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "ANTHROPIC_BEDROCK_BASE_URL",
+    "ANTHROPIC_VERTEX_BASE_URL",
+    "ANTHROPIC_VERTEX_PROJECT_ID",
+    "CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+    "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+)
 _UNKNOWN_OPTION = re.compile(r"unknown option|unrecognized|invalid option|error: option", re.IGNORECASE)
 
 
@@ -54,14 +67,15 @@ def neutral_dir(name: str, repo: Path, role: str) -> Path:
     return path
 
 
-def child_env(billing_mode: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+def child_env(billing_mode: str, extra: dict[str, str] | None = None, *, engine: str = "claude-code") -> dict[str, str]:
+    """The agent's environment. Keys are stripped after the env_file is merged, so it cannot bring an API key back."""
     env = dict(os.environ)
+    env.update(extra or {})
     for key in STRIP_ALWAYS:
         env.pop(key, None)
     if billing_mode == "subscription":
-        for key in STRIP_FOR_SUBSCRIPTION:
+        for key in STRIP_FOR_SUBSCRIPTION + (STRIP_CLAUDE_ROUTING if engine == "claude-code" else ()):
             env.pop(key, None)
-    env.update(extra or {})
     return env
 
 
@@ -85,13 +99,18 @@ class ClaudeCodeBackend(Backend):
         git_push: str = "never",
         binary: str = "claude",
         env_extra: dict[str, str] | None = None,
+        sandboxed: bool = False,
+        sandbox_writable: tuple[str, ...] = (),
     ) -> None:
         super().__init__(role_cfg, repo=repo, project=project)
+        self.sandboxed = sandboxed and not role_cfg.read_only
+        self.sandbox_writable = sandbox_writable
         self.billing_mode = billing_mode
         self.git_push = git_push
         self.binary = binary
         self.env_extra = env_extra or {}
         self._started = False
+        self._proc: subprocess.Popen[str] | None = None
 
     # -- setup and health
 
@@ -135,7 +154,8 @@ class ClaudeCodeBackend(Backend):
     def capabilities(self) -> Capabilities:
         if self.cfg.read_only:
             return Capabilities(read_only=READ_ONLY_ENFORCED, question_guard="no question tool available; --permission-prompts none")
-        return Capabilities(read_only="n/a (the builder writes)", question_guard="AskUserQuestion disallowed; --permission-prompts none")
+        guard = sandbox.describe(self.repo) if self.sandboxed else "not sandboxed: writes outside the repo are found after the turn"
+        return Capabilities(read_only="n/a (the builder writes)", question_guard="AskUserQuestion disallowed; --permission-prompts none", write_guard=guard)
 
     def session_directory(self, session_id: str) -> str | None:
         for path in (Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
@@ -152,6 +172,21 @@ class ClaudeCodeBackend(Backend):
     def resume(self, session_id: str) -> None:
         super().resume(session_id)
         self._started = True
+
+    def abort(self) -> None:
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            kill_group(proc, grace=5.0)
+
+    def _process_started(self, proc: subprocess.Popen[str]) -> None:
+        self._proc = proc
+        if self.on_process:
+            self.on_process(proc)
+
+    def _process_ended(self) -> None:
+        self._proc = None
+        if self.on_process:
+            self.on_process(None)
 
     def start_session(self, title: str) -> None:
         super().start_session(title)
@@ -205,7 +240,10 @@ class ClaudeCodeBackend(Backend):
     ) -> Reply:
         session_args = ["--session-id", self._session_id] if fresh else ["--resume", self._session_id]
         cmd = self.command(session_args=session_args)
-        parser = _StreamParser(on_event)
+        if self.sandboxed:
+            cmd = sandbox.wrap(cmd, self.repo, self.sandbox_writable)
+        # The billing check runs on the first event: a turn on the wrong account is ended before it does any work.
+        parser = _StreamParser(on_event, on_init=self._check_billing)
         raw = raw_path.open("a", encoding="utf-8") if raw_path else None
         started = time.monotonic()
 
@@ -224,8 +262,10 @@ class ClaudeCodeBackend(Backend):
                 cancel=cancel,
                 on_line=on_line,
                 on_stall=lambda s: on_event(Event("status", f"no output for {int(s // 60)} minutes; still running")),
+                on_start=self._process_started,
             )
         finally:
+            self._process_ended()
             if raw:
                 raw.close()
         if result.cancelled:
@@ -256,6 +296,8 @@ class ClaudeCodeBackend(Backend):
             duration_s=time.monotonic() - started,
             raw_path=raw_path,
             steps=parser.steps,
+            cost_usd=parser.cost_usd,
+            usage=parser.usage,
         )
 
     def _check_billing(self, init: dict[str, Any] | None) -> None:
@@ -272,6 +314,8 @@ def _classified(text: str, now: datetime) -> Exception:
     kind = classify(text)
     if kind == "auth":
         return AuthFailed(f"{text[:300]}. Run `claude login`.")
+    if kind == "billing":
+        return BillingFailed(text[:300])
     if kind == "session_limit":
         return SessionLimit(text[:300], reset_at=parse_reset(text, now))
     if kind == "rate_limited":
@@ -280,8 +324,11 @@ def _classified(text: str, now: datetime) -> Exception:
 
 
 class _StreamParser:
-    def __init__(self, on_event: Callable[[Event], None]) -> None:
+    def __init__(self, on_event: Callable[[Event], None], on_init: Callable[[dict[str, Any]], None] | None = None) -> None:
         self.on_event = on_event
+        self.on_init = on_init
+        self.cost_usd: float | None = None
+        self.usage: dict[str, int] = {}
         self.init: dict[str, Any] | None = None
         self.result: dict[str, Any] | None = None
         self.steps: list[str] = []
@@ -300,26 +347,35 @@ class _StreamParser:
         kind = data.get("type")
         if kind == "system" and data.get("subtype") == "init":
             self.init = data
+            if self.on_init:
+                self.on_init(data)
         elif kind == "assistant":
+            # A subagent's messages carry the Task call's id: its tool calls still count for the safety audits,
+            # but its text and model are not the role's own.
+            subagent = bool(data.get("parent_tool_use_id"))
             msg = data.get("message") or {}
-            if msg.get("model"):
+            if msg.get("model") and not subagent:
                 self.models.add(msg["model"])
             usage = msg.get("usage") or {}
-            if usage:
+            if usage and not subagent:
                 self.context_tokens = sum(int(usage.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
             texts = []
             for block in msg.get("content") or []:
-                if block.get("type") == "text" and block.get("text"):
+                if block.get("type") == "text" and block.get("text") and not subagent:
                     texts.append(block["text"])
                     self.on_event(Event("text", block["text"]))
                 elif block.get("type") == "tool_use":
                     call = ToolCall(block.get("name", "?"), tool_summary(block.get("name", ""), block.get("input") or {}))
                     self.tools.append(call)
-                    self.on_event(Event("tool", call.summary, tool=call.name))
+                    self.on_event(Event("tool", call.summary, tool=("subagent " if subagent else "") + call.name))
             if texts:
                 self.steps.append("\n".join(texts))
         elif kind == "result":
             self.result = data
+            if isinstance(data.get("total_cost_usd"), (int, float)):
+                self.cost_usd = float(data["total_cost_usd"])
+            usage = data.get("usage") or {}
+            self.usage = {k: int(usage.get(k) or 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens") if usage.get(k)}
         elif kind == "system":
             subtype = str(data.get("subtype", ""))
             if any(word in subtype for word in ("retry", "limit", "error", "compact")):

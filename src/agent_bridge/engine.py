@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import signal
+import subprocess
+import sys
+import time
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +23,7 @@ from agent_bridge import prompts
 from agent_bridge.backends.base import (
     AuthFailed,
     Backend,
+    BillingFailed,
     BackendError,
     Cancelled,
     Event,
@@ -47,7 +53,7 @@ RESET_MARGIN = 120
 LIMIT_SLEEP_CAP = 48 * 3600
 IDLE_NUDGE_AFTER, IDLE_SLEEP_AFTER = 3, 5
 IDLE_SLEEP_START, IDLE_SLEEP_MAX = 1800, 7200
-SLEEP_STEP, WAIT_POLL = 5.0, 15.0
+SLEEP_STEP, WAIT_POLL = 5.0, 5.0
 
 DEFAULT_DANGER = [
     (re.compile(r"\bgit\s+push\b[^\n]*(?:--force\b|--force-with-lease\b|\s-f\b)"), "force push"),
@@ -64,6 +70,53 @@ SHELL_WRITE = re.compile(
     r"\bgit\s+(?:-C\s+\S+\s+)?(?:commit|add|reset|checkout|switch|push|rm|mv|merge|rebase|stash|clean|restore|tag|cherry-pick|revert|am|apply)\b"
     r"|\b(?:rm|mv|cp|touch|mkdir|tee|truncate|ln)\s|\bsed\s+-i|>{1,2}\s*/"
 )
+
+
+GIT_COMMIT = re.compile(r"\bgit\s+(?:-C\s+\S+\s+)?commit\b")
+
+
+def _expand_home(text: str, home: str) -> str:
+    text = re.sub(r"\$\{HOME\}|\$HOME\b", lambda m: home, text)
+    return re.sub(r"(?<![\w/.~-])~(?=/|\s|$|['\"])", lambda m: home, text)
+
+
+def _mask_repo(text: str, variants: list[str]) -> str:
+    """Hide the repo's own paths, which may contain spaces, so they are not split into false outside paths."""
+    for v in sorted({v for v in variants if v}, key=len, reverse=True):
+        text = re.sub(re.escape(v) + r"(?=/|$|[\s'\";|&)])", "AGENTBRIDGEREPO", text)
+    return text
+
+
+def _shell_dirs(command: str, repo: str, home: str) -> list[str]:
+    """The folders a shell command works in: each cd target and git -C path, followed from the repo."""
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = command.split()
+    cwd, out, i = repo, [], 0
+
+    def resolve(target: str) -> str:
+        target = home + target[1:] if target == "~" or target.startswith("~/") else target
+        target = re.sub(r"\$\{HOME\}|\$HOME\b", lambda m: home, target)
+        return os.path.normpath(os.path.join(cwd, target))
+
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "cd" and i + 1 < len(tokens):
+            target = tokens[i + 1]
+            if target == "-" or "`" in target or re.search(r"\$(?!\{?HOME\b)", target):
+                break
+            cwd = resolve(target)
+            out.append(cwd)
+            i += 2
+            continue
+        if tok == "git" and i + 2 < len(tokens) and tokens[i + 1] == "-C":
+            if "$" not in tokens[i + 2] or re.search(r"\$\{?HOME\b", tokens[i + 2]):
+                out.append(resolve(tokens[i + 2]))
+            i += 3
+            continue
+        i += 1
+    return out
 
 
 class FatalError(Exception):
@@ -98,6 +151,7 @@ class State:
     planner_queue: list[str] = field(default_factory=list)
     supervisor_notes: list[str] = field(default_factory=list)
     replan_history: dict[str, list[str]] = field(default_factory=dict)
+    usage: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def load(cls, path: Path) -> State:
@@ -138,6 +192,7 @@ class Engine:
         confirm: Callable[[str, str], str | None] | None = None,
         on_complete: Callable[[Engine], None] | None = None,
         pid_start: Callable[[int], str | None] = pid_start_time,
+        notifier: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self.cfg = cfg
         self.sd = sd
@@ -148,6 +203,10 @@ class Engine:
         self.confirm = confirm
         self.on_complete = on_complete
         self.pid_start = pid_start
+        self.notifier = notifier
+        self._run_cost = 0.0
+        for backend in backends.values():
+            backend.on_process = self._track_agent
         self.st = State.load(sd.state)
         self.enforcement = {role: b.capabilities().read_only for role, b in backends.items()}
         self._replies_this_run = 0
@@ -223,6 +282,8 @@ class Engine:
 
     def kickoff(self, text: str, *, origin: str = "owner") -> None:
         """A first message for the builder; the supervisor sees it in its next turn."""
+        if self.st.phase == "PAUSED":
+            self._resume_from_pause()
         self._new_work()
         pending = self.st.pending or new_pending()
         if origin == "owner":
@@ -264,10 +325,16 @@ class Engine:
         """Deliver queued owner input into the state. True if something is bound for the builder."""
         for_builder = False
         for item in self.sd.inbox_peek():
-            if item.kind == "say":
-                for_builder |= self.owner_message(str(item.data.get("text", "")), str(item.data.get("to", "both")))
-            else:
-                for_builder |= self.handle_inbox_item(item.kind, item.data)
+            try:
+                if item.kind == "say":
+                    for_builder |= self.owner_message(str(item.data.get("text", "")), str(item.data.get("to", "both")))
+                else:
+                    for_builder |= self.handle_inbox_item(item.kind, item.data)
+            except Exception as e:  # noqa: BLE001 - one bad item must not stop every later run
+                where = self.sd.inbox_set_aside(item, f"{type(e).__name__}: {e}")
+                self.j.review(f"OWNER INPUT SET ASIDE ({item.kind})", f"{type(e).__name__}: {e}\nmoved to {where}; nothing else was changed")
+                self.j.console(f"owner input ({item.kind}) failed and was set aside: {e}")
+                continue
             self.sd.inbox_ack(item)
         return for_builder
 
@@ -282,8 +349,11 @@ class Engine:
         self._exchange_limit = exchanges
         self._replies_this_run = 0
         self._run_started = self.now()
+        self._run_cost = 0.0
         if self.st.phase == "PAUSED":
             self._resume_from_pause()
+        self._end_leftover_agent()
+        self._verify_sessions()
         self._recover_in_flight()
         self.j.event("run_start", phase=self.st.phase, exchange=self.st.exchange, limit=exchanges)
         try:
@@ -344,6 +414,59 @@ class Engine:
         self.save()
         self.j.event("resumed", reason=pause.get("reason"), phase=self.st.phase)
 
+    def _track_agent(self, proc: Any) -> None:
+        """Remember the running agent process: a bridge killed with SIGKILL cannot end it, its next start can."""
+        if proc is None:
+            self.sd.agent_pid.unlink(missing_ok=True)
+            return
+        try:
+            atomic_write_json(self.sd.agent_pid, {"pid": proc.pid, "start": self.pid_start(proc.pid), "at": iso(self.now())})
+        except OSError:
+            pass
+
+    def _end_leftover_agent(self) -> None:
+        path = self.sd.agent_pid
+        try:
+            info = read_json(path, default=None)
+        except (OSError, ValueError):
+            info = None
+        pid, start = (info.get("pid"), info.get("start")) if isinstance(info, dict) else (None, None)
+        if isinstance(pid, int) and start and self.pid_start(pid) == start:
+            for sig in (signal.SIGTERM, signal.SIGKILL):
+                try:
+                    os.killpg(pid, sig)
+                except OSError:
+                    break
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline and self.pid_start(pid) == start:
+                    time.sleep(0.1)
+                if self.pid_start(pid) != start:
+                    break
+            self.j.review(
+                "LEFTOVER AGENT PROCESS ENDED",
+                f"pid {pid} from a previous run was still working on its turn (that bridge was killed); it was ended before the turn is resent",
+            )
+            self.j.console(f"ended a leftover agent process (pid {pid}) from a previous run")
+        path.unlink(missing_ok=True)
+
+    def _verify_sessions(self) -> None:
+        """A stored session must belong to this repo (or the role's own folder); otherwise start a fresh one."""
+        repo = os.path.realpath(self.cfg.project.repo)
+        for role, backend in self.backends.items():
+            info = self.st.sessions.get(role) or {}
+            sid = info.get("id")
+            if not sid or info.get("closed") or info.get("engine") not in (None, backend.engine):
+                continue
+            try:
+                directory = backend.session_directory(sid)
+            except Exception:  # noqa: BLE001 - a check, never a reason to stop
+                continue
+            if directory is None:
+                continue
+            if os.path.realpath(directory) not in {repo, os.path.realpath(backend.workdir)}:
+                self.j.review(f"SESSION FROM ANOTHER FOLDER ({role})", f"session {sid} belongs to {directory}, not {repo}; a fresh session starts instead")
+                self.retire_session(role, f"its stored session belonged to {directory}")
+
     def _recover_in_flight(self) -> None:
         st = self.st
         if st.phase == "BUILDER_TURN" and st.pending and st.pending.get("in_flight"):
@@ -364,6 +487,8 @@ class Engine:
             return f"max_exchanges reached: {self._replies_this_run} exchanges in this run"
         if b.max_wall_time is not None and (self.now() - self._run_started).total_seconds() >= b.max_wall_time:
             return f"max_wall_time reached: {format_duration(b.max_wall_time)} since this run started"
+        if b.max_cost_usd is not None and self._run_cost >= b.max_cost_usd:
+            return f"max_cost_usd reached: ${self._run_cost:.2f} of usage in this run, at API prices (cap ${b.max_cost_usd:.2f})"
         unchanged = self.st.counters.get("unchanged", 0)
         if b.max_unchanged_exchanges is not None and unchanged >= b.max_unchanged_exchanges and self.st.phase != "WAITING":
             return f"max_unchanged_exchanges reached: {unchanged} exchanges in a row changed nothing in the repo"
@@ -448,7 +573,8 @@ class Engine:
         self._check_models("builder", reply)
         self._audit_builder(reply, before, after)
         outside = self._outside_repo(reply)
-        notes = self.after_builder_audit(before, after)
+        notes = self._wrote_elsewhere(reply, before, after) + self.after_builder_audit(before, after)
+        verify = self._verify()
         signals = parse_builder(reply.text, now=self.now(), phase_pattern=cfg.rotation.phase_complete_pattern)
         changed = before.fingerprint() != after.fingerprint()
         st.counters["unchanged"] = 0 if changed else st.counters.get("unchanged", 0) + 1
@@ -466,10 +592,11 @@ class Engine:
             "context_tokens": reply.context_tokens,
             "nudges": [],
             "notes": notes,
+            "verify": verify,
         }
         st.pending = None
         st.phase = "SUPERVISOR_TURN"
-        for key in ("timeouts_builder", "questions_builder", "errors_builder", "limit_sleep_s"):
+        for key in ("timeouts_builder", "questions_builder", "errors_builder", "limit_sleep_s", "limit_unknown_builder"):
             st.counters.pop(key, None)
         self.save()
         self.j.event(
@@ -495,21 +622,96 @@ class Engine:
             return self._sleep_until(self.now() + timedelta(seconds=seconds), f"idle backstop: {unchanged} exchanges without a repo change", resume="SUPERVISOR_TURN")
         return None
 
+    def _wrote_elsewhere(self, reply: Reply, before: Snapshot, after: Snapshot) -> list[str]:
+        """The L22 signature: the builder wrote or committed, yet this repo did not change."""
+        notes = []
+        commits = [
+            c for c in reply.tool_calls if c.name.lower() in SHELL_TOOLS and GIT_COMMIT.search(c.summary) and "--dry-run" not in c.summary
+        ]
+        if commits and before.head == after.head:
+            notes.append(
+                "The builder ran `git commit`, but this repo's HEAD did not move: the commit failed, or it went to another "
+                "repository. Check before accepting the report."
+            )
+        if any(c.name.lower() in FILE_WRITE_TOOLS for c in reply.tool_calls) and before.fingerprint() == after.fingerprint():
+            notes.append(
+                "The builder used file-writing tools, but nothing in this repo changed: the writes went to ignored files or to "
+                "another folder. Check before accepting the report."
+            )
+        for note in notes:
+            self.j.review(f"BUILDER WROTE BUT THE REPO DID NOT CHANGE at exchange {self.st.exchange}", note)
+        return notes
+
+    def _verify(self) -> dict[str, Any] | None:
+        """The project's own check (bridge.toml project.verify), run by the bridge, so the supervisor has evidence."""
+        command = self.cfg.project.verify
+        if not command:
+            return None
+        from agent_bridge.backends.claude_code import child_env
+        from agent_bridge.backends.proc import kill_group
+
+        started = time.monotonic()
+        code: int | None
+        try:
+            proc = subprocess.Popen(
+                ["/bin/sh", "-c", command],
+                cwd=self.cfg.project.repo,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                text=True,
+                errors="replace",
+                start_new_session=True,
+                env=child_env(self.cfg.billing_mode, None),
+            )
+        except OSError as e:
+            output, code = f"could not start: {e}", -1
+        else:
+            try:
+                output, _ = proc.communicate(timeout=self.cfg.project.verify_timeout)
+                code = proc.returncode
+            except BaseException:
+                kill_group(proc, grace=5.0)
+                output = proc.communicate()[0] if proc.stdout else ""
+                code = None
+                if not isinstance(sys.exc_info()[1], subprocess.TimeoutExpired):
+                    raise
+        seconds = round(time.monotonic() - started, 1)
+        tail = "\n".join((output or "").splitlines()[-40:])[-4000:]
+        result = {"command": command, "exit": code, "seconds": seconds, "tail": tail}
+        self.j.event("verify", exchange=self.st.exchange, exit=code, seconds=seconds)
+        if code != 0:
+            self.j.review(f"VERIFY {'TIMED OUT' if code is None else f'FAILED (exit {code})'} at exchange {self.st.exchange}", f"$ {command}\n{tail}")
+        return result
+
     def before_builder_turn(self) -> None:
         """Remember the contract hashes; filled by the planner layer."""
 
     def _outside_repo(self, reply: Reply) -> list[str]:
-        """Writes under the owner's home outside the repo: reported, and they pause the run. Reads are only reported."""
+        """Writes under the owner's home outside the repo: reported, and they pause the run. Reads are only reported.
+
+        Paths are read from the tool calls: absolute paths, ~ and $HOME, and the folders a shell command moves to with
+        cd or git -C. A relative path that the tool resolved somewhere else is invisible here (see _wrote_elsewhere)."""
         repo = os.path.realpath(self.cfg.project.repo)
         home = os.path.realpath(Path.home())
         roots = tuple({"/Users/", home + os.sep})
+        variants = [repo, str(self.cfg.project.repo), repo.removeprefix("/private")]
+
+        def outside(path: str) -> bool:
+            real = os.path.realpath(path)
+            if not (path.startswith(roots) or real.startswith(roots)):
+                return False
+            return not (real == repo or real.startswith(repo + os.sep))
+
         writes, reads = [], []
         for call in reply.tool_calls:
-            paths = [p for p in OUTSIDE_PATH.findall(call.summary) if p.startswith(roots) or os.path.realpath(p).startswith(roots)]
-            paths = [p for p in paths if not (os.path.realpath(p) == repo or os.path.realpath(p).startswith(repo + os.sep))]
-            if not paths:
-                continue
             name = call.name.lower()
+            text = _mask_repo(_expand_home(call.summary, home), variants)
+            found = [p for p in OUTSIDE_PATH.findall(text) if outside(p)]
+            if name in SHELL_TOOLS:
+                found += [d for d in _shell_dirs(call.summary, repo, home) if outside(d)]
+            if not found:
+                continue
             mutating = name in FILE_WRITE_TOOLS or (name in SHELL_TOOLS and SHELL_WRITE.search(call.summary))
             (writes if mutating else reads).append(f"{call.name}: {call.summary[:200]}")
         if reads:
@@ -584,6 +786,8 @@ class Engine:
             blocks.append(Block("bridge", f"The builder asked for: {review['wait']}. It is honoured after your reply unless you write NO WAIT or a different WAIT line."))
         if review.get("wait_error"):
             blocks.append(Block("bridge", f"The builder wrote a WAIT line the bridge could not use: {review['wait_error']}"))
+        if review.get("verify"):
+            blocks.append(Block("bridge", prompts.verify_note(review["verify"])))
         if review.get("decisions"):
             blocks.append(Block("bridge", f"The builder listed {len(review['decisions'])} DECISIONS NEEDED; answer each in your REPLY."))
         for claim in review.get("phase_claims", [])[:1]:
@@ -606,7 +810,7 @@ class Engine:
         if st.feed:
             told = render([Block(f["origin"], f["text"]) for f in st.feed]).strip()
             blocks.append(Block("bridge", f"Besides your last REPLY, the builder was told:\n{told}"))
-        report = Path(review["report"]).read_text(encoding="utf-8") if review.get("report") else ""
+        report = Path(review["report"]).read_text(encoding="utf-8", errors="replace") if review.get("report") else ""
         if len(report) > REPORT_CHARS:
             report = f"[bridge] (the first {len(report) - REPORT_CHARS:,} characters are omitted; full text: {review['report']})\n" + report[-REPORT_CHARS:]
         message = render(blocks) + f"===== BUILDER REPORT (exchange {review.get('exchange', st.exchange)}) =====\n{report.strip()}\n===== END =====\n"
@@ -619,7 +823,7 @@ class Engine:
     def _supervisor_rules_text(self) -> str | None:
         path = self.cfg.project.supervisor_rules
         if path and path.exists():
-            return path.read_text(encoding="utf-8")
+            return path.read_text(encoding="utf-8", errors="replace")
         return None
 
     def _since_text(self, review: dict[str, Any]) -> str:
@@ -627,7 +831,8 @@ class Engine:
         if then and now_head and then != now_head:
             commits = self.repo.new_commits(then, now_head)
             subjects = "; ".join(c.subject for c in commits[:8]) + ("; ..." if len(commits) > 8 else "")
-            head = f"HEAD {then[:7]}..{now_head[:7]} ({len(commits)} commits: {subjects})"
+            stat = self.repo.diff_summary(then, now_head)
+            head = f"HEAD {then[:7]}..{now_head[:7]} ({len(commits)} commits: {subjects}){chr(10) + stat if stat else ''}"
         else:
             head = f"HEAD unchanged at {now_head[:7]}" if now_head else "no commits yet"
         changed = len(self.repo.status())
@@ -670,7 +875,7 @@ class Engine:
             if item["to_supervisor"]:
                 item["shown"] = True
         self._prune_owner_queue()
-        for key in ("timeouts_supervisor", "questions_supervisor", "errors_supervisor", "limit_sleep_s"):
+        for key in ("timeouts_supervisor", "questions_supervisor", "errors_supervisor", "limit_sleep_s", "limit_unknown_supervisor"):
             st.counters.pop(key, None)
         if self._last_supervisor_context and self._last_supervisor_context >= self.cfg.rotation.supervisor_max_context_tokens:
             st.rotate["supervisor"] = f"context reached {self._last_supervisor_context:,} tokens"
@@ -697,6 +902,8 @@ class Engine:
             out = parse_supervisor(text, now=self.now())
             if not text.strip():
                 nudge = "empty"
+            elif out.near_misses and not out.complete:
+                nudge = "near_miss"
             elif not out.has_reply and not out.complete:
                 nudge = "no_reply"
             elif out.scope is None and not out.complete:
@@ -715,6 +922,8 @@ class Engine:
 
     def _nudge_text(self, nudge: str, out: SupervisorOutput) -> str:
         fixed = {"empty": prompts.EMPTY_NUDGE, "no_reply": prompts.NO_REPLY_NUDGE, "no_scope": prompts.NO_SCOPE_NUDGE}
+        if nudge == "near_miss":
+            return prompts.near_miss_nudge(out.near_misses)
         return fixed.get(nudge) or self.scope_nudge_text(out)
 
     def scope_violation(self, out: SupervisorOutput) -> str | None:
@@ -733,6 +942,11 @@ class Engine:
             return out
         if nudge == "no_scope":
             self.j.review(f"SUPERVISOR REPLY WITHOUT SCOPE at exchange {self.st.exchange}", "sent anyway after one nudge")
+            return out
+        if nudge == "near_miss":
+            self.j.review(f"SUPERVISOR OUTPUT NEAR-MISS at exchange {self.st.exchange}", "\n".join(out.near_misses))
+            if not out.has_reply and not out.complete:
+                out.reply = out.raw.strip()
             return out
         if nudge.startswith("scope"):
             return self.scope_refused(out)
@@ -841,6 +1055,7 @@ class Engine:
         self.save()
         self.j.review(f"PROJECT COMPLETE at exchange {st.exchange}", summary)
         self.j.event("complete", exchange=st.exchange)
+        self.notify("complete", "PROJECT COMPLETE", summary.splitlines()[0] if summary else f"at exchange {st.exchange}")
         self.j.console(f"PROJECT COMPLETE at exchange {st.exchange}")
         if self.on_complete:
             self.on_complete(self)
@@ -927,14 +1142,25 @@ class Engine:
         def on_event(ev: Event) -> None:
             self.j.event("agent", role=role, type=ev.kind, text=ev.text[:2000], tool=ev.tool)
 
-        reply = backend.send(
-            message,
-            timeout=backend.cfg.timeout,
-            on_event=on_event,
-            cancel=_StopNow(self.sd),
-            on_session=lambda sid: self._record_session(role, sid),
-            raw_path=raw,
-        )
+        try:
+            reply = backend.send(
+                message,
+                timeout=backend.cfg.timeout,
+                on_event=on_event,
+                cancel=_StopNow(self.sd),
+                on_session=lambda sid: self._record_session(role, sid),
+                raw_path=raw,
+            )
+        except BackendError:
+            raise
+        except BaseException:
+            # Ctrl-C or SIGTERM: stop the turn where it runs (opencode's server keeps going otherwise).
+            try:
+                backend.abort()
+            except Exception:  # noqa: BLE001 - best effort on the way out
+                pass
+            raise
+        self._account(role, reply)
         self.j.event(
             "turn_end",
             role=role,
@@ -943,9 +1169,25 @@ class Engine:
             session=reply.session_id,
             models=sorted(reply.served_models),
             context_tokens=reply.context_tokens,
+            cost_usd=reply.cost_usd,
+            usage=reply.usage or None,
         )
         self._prune_turn_files()
         return reply
+
+    def _account(self, role: str, reply: Reply) -> None:
+        """Usage per role and in total, at the engine's API prices (on a subscription this is not what is billed)."""
+        u = self.st.usage
+        u["turns"] = u.get("turns", 0) + 1
+        if reply.cost_usd is not None:
+            u["cost_usd"] = round(u.get("cost_usd", 0.0) + reply.cost_usd, 6)
+            self._run_cost += reply.cost_usd
+        per = u.setdefault("roles", {}).setdefault(role, {})
+        per["turns"] = per.get("turns", 0) + 1
+        if reply.cost_usd is not None:
+            per["cost_usd"] = round(per.get("cost_usd", 0.0) + reply.cost_usd, 6)
+        for key, value in (reply.usage or {}).items():
+            per[key] = per.get(key, 0) + int(value)
 
     def _prune_turn_files(self, keep: int = 400) -> None:
         files = sorted(self.sd.turns.glob("*"), key=lambda p: p.stat().st_mtime)
@@ -969,6 +1211,8 @@ class Engine:
         pending = st.pending if role == "builder" else None
         if isinstance(e, Unsupported):
             raise FatalError(f"{role}: {e}")
+        if isinstance(e, BillingFailed):
+            return self.pause("billing", f"{role}: {e}. The account has no credit for this turn; add credit or change billing, then `agent-bridge run`.")
         if isinstance(e, AuthFailed):
             return self.pause("auth", f"{role}: {e}. Run `claude login` (or re-enroll the pool account), then `agent-bridge run`.")
         if isinstance(e, Cancelled):
@@ -1047,6 +1291,15 @@ class Engine:
         self.j.console(f"Stopped at exchange {self.st.exchange}." + (f" Unsent message: {self.sd.unsent}" if unsent else ""))
         return EXIT_OK
 
+    def notify(self, kind: str, title: str, message: str) -> None:
+        """Tell the owner something needs them (desktop and/or [notify] command). Never fails the run."""
+        if self.notifier is None:
+            return
+        try:
+            self.notifier(kind, f"{self.cfg.project.name}: {title}", message[:400])
+        except Exception as e:  # noqa: BLE001
+            self.j.event("notify_failed", error=str(e))
+
     def pause(self, reason: str, detail: str, *, resume: str | None = None) -> int:
         st = self.st
         resume_phase = resume or st.phase
@@ -1058,6 +1311,7 @@ class Engine:
         atomic_write_text(self.sd.paused, self.pause_summary())
         if reason != "stop":
             self.j.review(f"PAUSED ({reason}) at exchange {st.exchange}", detail)
+            self.notify("paused", f"paused: {reason}", detail)
         self.j.event("paused", reason=reason, detail=detail, resume=resume_phase)
         self.j.console(f"PAUSED ({reason}): {detail}")
         return EXIT_OK if reason == "stop" else EXIT_PAUSED

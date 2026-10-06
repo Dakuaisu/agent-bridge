@@ -53,6 +53,10 @@ class LineEdit:
     def set(self, text: str) -> None:
         self.text, self.pos = text, len(text)
 
+    def insert(self, text: str) -> None:
+        self.text = self.text[: self.pos] + text + self.text[self.pos :]
+        self.pos += len(text)
+
     def key(self, name: str) -> bool:
         t, p = self.text, self.pos
         if printable(name):
@@ -115,6 +119,20 @@ class TextArea:
 
     def set(self, text: str) -> None:
         self.__init__(text, self.placeholder)  # type: ignore[misc]
+
+    def insert(self, text: str) -> None:
+        """Insert pasted text at the cursor in one step (a long paste key by key is slow)."""
+        parts = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        line = self.lines[self.row]
+        head, tail = line[: self.col], line[self.col :]
+        if len(parts) == 1:
+            self.lines[self.row] = head + parts[0] + tail
+            self.col += len(parts[0])
+            return
+        new = [head + parts[0], *parts[1:-1], parts[-1] + tail]
+        self.lines[self.row : self.row + 1] = new
+        self.row += len(parts) - 1
+        self.col = len(parts[-1])
 
     def visual(self, cols: int | None = None) -> list[tuple[int, int, int]]:
         """(line index, start, end) per screen row."""

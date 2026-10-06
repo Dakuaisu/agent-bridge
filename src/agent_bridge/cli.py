@@ -268,7 +268,7 @@ def cmd_approve(a: argparse.Namespace) -> int:
         raise runtime.UsageError(f"a bridge is running (pid {holder.get('pid')}); stop it before approving the plan")
     engine = runtime.build_engine(cfg, sd)
     st = engine.st
-    if st.planning and st.planning.get("stage") != "approved" and st.phase != "PLAN_REVIEW":
+    if st.contract is None and st.planning and st.planning.get("stage") != "approved" and st.phase != "PLAN_REVIEW":
         raise runtime.UsageError(
             f"the planner has not finished ({st.phase}); `agent-bridge run` continues the planning, or answer it with "
             f"`agent-bridge say`. The last check failures are in {sd.plan / 'errors.md'}"
@@ -373,7 +373,7 @@ def cmd_status(a: argparse.Namespace) -> int:
 def status_info(cfg, sd: StateDir) -> dict[str, Any]:
     st = State.load(sd.state)
     holder = lock_holder(sd.lock)
-    events = read_events(sd.events)
+    events = read_events(sd.events, tail_bytes=4_000_000)
     open_turn = None
     for e in events:
         if e["kind"] == "turn_start":
@@ -391,6 +391,7 @@ def status_info(cfg, sd: StateDir) -> dict[str, Any]:
             "engine": b.engine,
             "model": b.cfg.engine_model(),
             "read_only": b.capabilities().read_only,
+            "write_guard": b.capabilities().write_guard,
             "session": None if session.get("closed") else session.get("id"),
         }
     changes = [read_json(p) for p in sorted((sd.plan / "changes").glob("PC-*.json"))]
@@ -423,6 +424,8 @@ def status_info(cfg, sd: StateDir) -> dict[str, Any]:
         "max_unchanged": cfg.budget.max_unchanged_exchanges,
         "warnings_since_launch": [f"{ts} {title}" for ts, title in warnings],
         "phases_done": st.phases_done,
+        "usage": st.usage,
+        "max_cost_usd": cfg.budget.max_cost_usd,
     }
 
 
@@ -458,6 +461,11 @@ def format_status(i: dict[str, Any]) -> str:
     if i["decisions_needed"]:
         out.append("decisions:    " + "; ".join(i["decisions_needed"]))
     out.append(f"owner queue:  {i['owner_queue']} message(s) not yet delivered")
+    u = i.get("usage") or {}
+    if u.get("turns"):
+        cost = f"${u['cost_usd']:.2f} at API prices" if "cost_usd" in u else "cost not reported"
+        cap = f" (cap per run: ${i['max_cost_usd']:.2f})" if i.get("max_cost_usd") else ""
+        out.append(f"usage:        {u['turns']} turns, {cost}{cap}; on a subscription this is not what you are billed")
     out.append(f"budget:       unchanged streak {i['unchanged_streak']}/{i['max_unchanged'] or 'off'}")
     warnings = i["warnings_since_launch"]
     out.append(f"warnings:     {len(warnings)} since the last launch" + ("".join(f"\n  - {w}" for w in warnings[-5:]) if warnings else ""))
@@ -576,7 +584,7 @@ def cmd_logs(a: argparse.Namespace) -> int:
     target = {"transcript": sd.loop_log, "review": sd.review_log, "console": sd.console_log, "serve": sd.serve_log, "events": sd.events}
     chosen = next((k for k in target if getattr(a, k)), None)
     if chosen is None:
-        records = read_events(sd.events)
+        records = read_events(sd.events, tail_bytes=max(2_000_000, a.n * 20_000))
         for e in records[-a.n :]:
             line = render_event(e)
             if line:
@@ -617,6 +625,28 @@ def _follow(path: Path, *, rendered: bool) -> None:
         return
 
 
+def push_protection(cfg, engine) -> str:
+    if cfg.git_push == "allowed":
+        return "allowed (owner setting)"
+    remotes = [r for r in engine.repo.out("remote").split() if r]
+    where = "no remote is configured, so there is nothing to push to; " if not remotes else ""
+    builder = engine.backends["builder"]
+    if builder.engine == "claude-code":
+        how = "denied in Claude Code (permissions.deny: Bash(git push:*)), and remote refs are compared after every builder turn"
+    else:
+        how = "not enforceable on opencode (its claude-bridge plugin overrides denies); remote refs are compared after every builder turn"
+    return f"never: {where}{how}"
+
+
+def notify_summary(cfg) -> str:
+    parts = []
+    if cfg.notify.desktop:
+        parts.append("desktop notifications" + ("" if sys.platform == "darwin" else " (macOS only: none here)"))
+    if cfg.notify.command:
+        parts.append(f"`{cfg.notify.command}`")
+    return " and ".join(parts) + " on pauses, completion and owner questions" if parts else "off"
+
+
 def cmd_check(a: argparse.Namespace) -> int:
     repo, cfg, sd = load_project(a)
     print(f"config:       {cfg.path} (valid)")
@@ -628,9 +658,15 @@ def cmd_check(a: argparse.Namespace) -> int:
             version = b.version_check()
         except Exception as e:  # noqa: BLE001 - reported, not raised
             version = f"unavailable ({e})"
-        print(f"{role + ':':<13} {b.engine} {b.cfg.engine_model()} ({version}); read-only: {b.capabilities().read_only}")
+        cap = b.capabilities()
+        print(f"{role + ':':<13} {b.engine} {b.cfg.engine_model()} ({version}); read-only: {cap.read_only}")
+        if cap.write_guard:
+            print(f"{'writes:':<13} {cap.write_guard}")
     name, email = engine.repo.local_identity()
     print(f"git identity: {name or '(global)'} <{email or 'not set locally'}>")
+    print(f"git push:     {push_protection(cfg, engine)}")
+    print(f"verify:       {'`' + cfg.project.verify + '` after every builder turn' if cfg.project.verify else 'not set: the supervisor has no test run of its own (project.verify)'}")
+    print(f"notify:       {notify_summary(cfg)}")
     ignored = ".bridge/" in (repo / ".gitignore").read_text() if (repo / ".gitignore").exists() else False
     print(f".gitignore:   {'ignores .bridge/' if ignored else 'does not ignore .bridge/ (init adds it)'}")
     agents = repo / "AGENTS.md"
@@ -773,5 +809,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"agent-bridge: {e}", file=sys.stderr)
         return EXIT_USAGE
     except KeyboardInterrupt:
-        print("\ninterrupted; the state is saved and `agent-bridge run` resumes it", file=sys.stderr)
+        try:
+            print("\ninterrupted; the running turn was ended, the state is saved, and `agent-bridge run` resumes it", file=sys.stderr)
+        except OSError:
+            pass
         return 130
