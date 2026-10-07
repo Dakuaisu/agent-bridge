@@ -145,6 +145,18 @@ def test_owner_only_settings_are_listed(repo: Path) -> None:
     assert cfg.owner_only_settings() == ['git.push = "allowed"', 'billing.mode = "api-key"']
 
 
+def test_every_owner_setting_counts_for_a_first_plan(repo: Path) -> None:
+    text = "version = 1\n[project]\nverify = 'make test'\n[safety]\nsandbox = 'on'\nsandbox_writable = ['~']\n[notify]\ncommand = 'touch x'\n"
+    cfg = load_config(write(repo, text))
+    assert cfg.owner_only_settings() == [
+        'project.verify = "make test"',
+        'safety.sandbox = "on"',
+        'safety.sandbox_writable = ["~"]',
+        'notify.command = "touch x"',
+    ]
+    assert [s.split(" = ")[0] for s in cfg.owner_only_settings()] == list(cfg.owner_settings())[2:]
+
+
 def test_bad_regexes_are_errors(repo: Path) -> None:
     text = "version = 1\n[rotation]\nphase_complete_pattern = '('\n[safety]\ndanger_commands = ['git push', '[']\n"
     with pytest.raises(ConfigError) as err:

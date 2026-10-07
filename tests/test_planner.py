@@ -141,6 +141,8 @@ def test_adopting_needs_the_prd_and_rules(repo: Path, clock: FakeClock) -> None:
     ("extra", "error"),
     [
         ("[git]\npush = 'allowed'\n", "owner's to set"),
+        ("[notify]\ncommand = 'touch /tmp/x'\n", "owner's to set"),
+        ("[safety]\nsandbox_writable = ['~']\n", "owner's to set"),
         ("[builder]\nengine = 'opencode'\n[opencode]\nport = 4150\n", "keep [builder] engine and model"),
         ("prd = 'docs/SPEC.md'\n", "keep project.prd as docs/PRD.md"),
     ],

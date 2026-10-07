@@ -172,21 +172,21 @@ class Config:
         p = self.project
         return [p.prd, p.rules[0], p.decisions, p.open_items, self.path]
 
-    def owner_only_settings(self) -> list[str]:
-        found = []
-        if self.git_push == "allowed":
-            found.append('git.push = "allowed"')
-        if self.billing_mode == "api-key":
-            found.append('billing.mode = "api-key"')
-        if self.project.verify:
-            found.append(f"project.verify = {self.project.verify!r}")
-        if self.safety.sandbox == "off":
-            found.append('safety.sandbox = "off"')
-        return found
+    def owner_settings(self) -> dict[str, Any]:
+        """What only the owner may set: no plan, the first or a later one, may set or change any of it."""
+        return {
+            "git.push": self.git_push,
+            "billing.mode": self.billing_mode,
+            "project.verify": self.project.verify,
+            "safety.sandbox": self.safety.sandbox,
+            "safety.sandbox_writable": list(self.safety.sandbox_writable),
+            "notify.command": self.notify.command,
+        }
 
-    def owner_settings(self) -> tuple[Any, ...]:
-        """What only the owner may change: a re-plan that changes any of it is refused."""
-        return (self.git_push, self.billing_mode, self.project.verify, self.safety.sandbox, self.safety.sandbox_writable, self.notify.command)
+    def owner_only_settings(self) -> list[str]:
+        """The owner-only settings this file moves away from their defaults."""
+        defaults = config_from_dict({"version": SCHEMA_VERSION, "project": {"name": self.project.name}}, self.path).owner_settings()
+        return [f"{key} = {json.dumps(value)}" for key, value in self.owner_settings().items() if value != defaults[key]]
 
 
 class _Table:

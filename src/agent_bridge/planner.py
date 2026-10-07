@@ -702,10 +702,7 @@ class ContractEngine(Engine):
             return [f"bridge.toml: {p}" for p in e.problems]
         errors = self._config_identity_errors(new)
         if new.owner_settings() != self.cfg.owner_settings():
-            errors.append(
-                "bridge.toml: git.push, billing.mode, project.verify, the sandbox settings and notify.command are the "
-                "owner's to change; a plan change may not touch them"
-            )
+            errors.append(f"bridge.toml: {', '.join(self.cfg.owner_settings())} are the owner's to change; a plan change may not touch them")
         return errors
 
     def _replan_retry(self, errors: list[str]) -> int | None:
