@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -97,11 +98,23 @@ def test_subscription_billing_refuses_an_api_key_session(setup) -> None:
         send(make("builder"))
 
 
+def _tz_database() -> bool:
+    try:
+        ZoneInfo("Asia/Kolkata")
+    except ZoneInfoNotFoundError:
+        return False
+    return True
+
+
 @pytest.mark.parametrize(
     ("message", "error"),
     [
         ("Failed to authenticate: OAuth session expired and could not be refreshed", AuthFailed),
-        ("You've hit your session limit · resets 9:40pm (Asia/Calcutta)", SessionLimit),
+        pytest.param(
+            "You've hit your session limit · resets 9:40pm (Asia/Calcutta)",
+            SessionLimit,
+            marks=pytest.mark.skipif(not _tz_database(), reason="the reset time needs a tz database"),
+        ),
         ("API Error: 500 internal", TransientError),
     ],
 )

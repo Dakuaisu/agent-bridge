@@ -15,6 +15,22 @@ from agent_bridge.limits import classify, parse_reset
 UTC = timezone.utc
 
 
+def _zones_known(*names: str) -> bool:
+    try:
+        for name in names:
+            ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return False
+    return True
+
+
+needs_tz = pytest.mark.skipif(
+    not _zones_known("Asia/Kolkata", "America/New_York", "America/Los_Angeles"),
+    reason="needs a tz database; without one the reset time is ignored (test_an_unknown_zone_is_logged_not_silent)",
+)
+
+
+@needs_tz
 def test_claude_session_limit_later_today() -> None:
     now = datetime(2026, 10, 2, 14, 25, 33, tzinfo=UTC)  # 19:55 IST
     text = 'claude CLI error (success): "You\'ve hit your session limit · resets 9:40pm (Asia/Calcutta)"'
@@ -22,12 +38,14 @@ def test_claude_session_limit_later_today() -> None:
     assert classify(text) == "session_limit"
 
 
+@needs_tz
 def test_claude_session_limit_rolls_to_tomorrow() -> None:
     now = datetime(2026, 10, 2, 16, 21, 12, tzinfo=UTC)  # 21:51 IST
     text = "You've hit your session limit · resets 2:40am (Asia/Calcutta)"
     assert parse_reset(text, now) == datetime(2026, 10, 3, 2, 40, tzinfo=IST)
 
 
+@needs_tz
 def test_weekly_limit_with_a_date() -> None:
     now = datetime(2026, 10, 6, 12, 0, tzinfo=IST)
     text = "You've hit your weekly limit · resets Oct 8, 2pm (Asia/Calcutta)"
@@ -35,6 +53,7 @@ def test_weekly_limit_with_a_date() -> None:
     assert classify(text) == "session_limit"
 
 
+@needs_tz
 def test_24_hour_clock_and_other_zones() -> None:
     now = datetime(2026, 10, 6, 12, 0, tzinfo=IST)
     when = parse_reset("limit reached · resets 21:40 (America/New_York)", now)
@@ -101,6 +120,7 @@ def _without_backward_links(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(limits, "ZoneInfo", zone)
 
 
+@needs_tz
 def test_a_legacy_zone_name_parses_without_the_backward_links(monkeypatch: pytest.MonkeyPatch) -> None:
     _without_backward_links(monkeypatch)
     now = datetime(2026, 10, 6, 20, 0, tzinfo=IST)
