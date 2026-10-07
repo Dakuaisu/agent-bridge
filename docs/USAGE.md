@@ -113,8 +113,8 @@ left off.
 
 Optional settings in `bridge.toml`; each is in the template that `init` writes:
 
-- `[project] verify = "make test"`: the bridge runs it after every builder turn and shows
-  the supervisor the exit code and the last lines. Its "tests pass" then rests on a run
+- `[project] verify = "make test"`: the bridge runs it after every builder turn, with the
+  `env_file`'s variables, and shows the supervisor the exit code and the last lines. Its "tests pass" then rests on a run
   the agents did not report themselves. Owner-only: a plan change cannot set it.
 - `[notify]`: a macOS notification (on by default) and/or your own `command`, when a run
   pauses, completes, or needs you. The command gets `AGENT_BRIDGE_EVENT`, `_TITLE`,

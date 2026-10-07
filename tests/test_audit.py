@@ -625,6 +625,34 @@ def test_the_verify_command_runs_after_each_builder_turn(repo: Path, clock: Fake
     assert "VERIFY FAILED (exit 3)" in review_log(repo)
 
 
+def test_an_interrupted_verify_does_not_resend_the_builder_turn(repo: Path, clock: FakeClock) -> None:
+    (repo / "bridge.toml").write_text("version = 1\n[project]\nname = 'demo'\nverify = 'echo checked'\n")
+    eng = make_engine(repo, clock, builder=["the first report", "x"], supervisor=[ok("go"), DONE])
+
+    def interrupted() -> None:
+        raise KeyboardInterrupt
+
+    eng._verify = interrupted  # type: ignore[method-assign]
+    eng.kickoff("go")
+    with pytest.raises(KeyboardInterrupt):
+        eng.run()
+    assert State.load(eng.sd.state).phase == "SUPERVISOR_TURN"
+    again = make_engine(repo, clock, builder=["r1"], supervisor=[ok("go"), DONE])
+    assert again.run() == 0
+    first = again.backends["supervisor"].sent[0]
+    assert "the first report" in first and "`echo checked`: exit 0" in first
+    assert len(again.backends["builder"].sent) == 1
+
+
+def test_verify_gets_the_env_file(repo: Path, clock: FakeClock) -> None:
+    (repo / ".env").write_text("MARKER=from-the-env-file\n")
+    (repo / "bridge.toml").write_text("version = 1\n[project]\nname = 'demo'\nenv_file = '.env'\nverify = 'echo marker=$MARKER'\n")
+    eng = make_engine(repo, clock, builder=["r0", "r1"], supervisor=[ok("go"), DONE])
+    eng.kickoff("go")
+    eng.run()
+    assert "marker=from-the-env-file" in eng.backends["supervisor"].sent[0]
+
+
 def test_notifications_on_pause_and_completion(repo: Path, clock: FakeClock) -> None:
     got: list[tuple[str, str]] = []
     eng = make_engine(repo, clock, builder=["r0", "r1"], supervisor=[ok("go"), DONE], notifier=lambda k, t, m: got.append((k, t)))

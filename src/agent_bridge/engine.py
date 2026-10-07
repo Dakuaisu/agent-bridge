@@ -670,7 +670,6 @@ class Engine:
         self._audit_builder(reply, before, after)
         outside = self._outside_repo(reply)
         notes = self._wrote_elsewhere(reply, before, after) + self.after_builder_audit(before, after)
-        verify = self._verify()
         signals = parse_builder(reply.text, now=self.now(), phase_pattern=cfg.rotation.phase_complete_pattern)
         changed = before.fingerprint() != after.fingerprint()
         st.counters["unchanged"] = 0 if changed else st.counters.get("unchanged", 0) + 1
@@ -688,7 +687,6 @@ class Engine:
             "context_tokens": reply.context_tokens,
             "nudges": [],
             "notes": notes,
-            "verify": verify,
         }
         st.pending = None
         st.phase = "SUPERVISOR_TURN"
@@ -745,6 +743,7 @@ class Engine:
             return None
         from agent_bridge.backends.claude_code import child_env
         from agent_bridge.backends.proc import kill_group
+        from agent_bridge.runtime import load_env_file
 
         started = time.monotonic()
         code: int | None
@@ -758,7 +757,7 @@ class Engine:
                 text=True,
                 errors="replace",
                 start_new_session=True,
-                env=child_env(self.cfg.billing_mode, None),
+                env=child_env(self.cfg.billing_mode, load_env_file(self.cfg.project.env_file)),
             )
         except OSError as e:
             output, code = f"could not start: {e}", -1
@@ -952,6 +951,10 @@ class Engine:
             review["exchange"] = st.exchange
             review["counted"] = True
             st.review = review
+        if self.cfg.project.verify and "verify" not in review:
+            # Here, not after the builder's turn: the report is saved by now, so an interrupt reruns the check, not the turn.
+            review["verify"] = self._verify()
+            self.save()
         rotate_reason = st.rotate.pop("supervisor", None)
         if rotate_reason:
             self.retire_session("supervisor", rotate_reason)

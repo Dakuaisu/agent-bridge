@@ -961,7 +961,9 @@ An outside audit reproduced each finding below with a script; each fix has a tes
   - billing errors pause the run instead of retrying.
 - **Evidence for the supervisor.**
   - `project.verify` is run by the bridge after every builder turn, and its exit code and last lines go
-    to the supervisor. It is owner-only.
+    to the supervisor. It is owner-only. It runs as the supervisor's turn starts, once the report is
+    saved, so an interrupt reruns the check rather than the builder's turn; it gets the env_file's
+    variables, as the agents do.
   - The supervisor's message also lists which files the new commits touched.
 - **Unattended runs.**
   - Desktop notifications on macOS and/or `[notify] command` when a run pauses, completes, or needs the
