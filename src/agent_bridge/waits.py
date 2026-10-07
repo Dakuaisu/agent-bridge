@@ -74,8 +74,26 @@ def _parse_time(text: str, now: datetime) -> datetime:
     return when
 
 
+PROC = Path("/proc")
+
+
+def proc_start(stat: str) -> str | None:
+    """The start time in /proc/<pid>/stat (field 22, clock ticks after boot), or None for a process that ended."""
+    fields = stat[stat.rfind(")") + 2 :].split()
+    if len(fields) < 20 or fields[0] in ("Z", "X"):
+        return None
+    return f"boot+{fields[19]}"
+
+
 def pid_start_time(pid: int) -> str | None:
-    """The process start time from ps, or None if no such process. Guards against pid reuse."""
+    """When the process started, or None if it is not running. Guards against pid reuse.
+
+    Linux reads /proc, because minimal images have no ps; elsewhere ps answers."""
+    if (PROC / "self" / "stat").exists():
+        try:
+            return proc_start((PROC / str(pid) / "stat").read_text())
+        except (OSError, ValueError):
+            return None
     try:
         out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent_bridge.clock import IST
-from agent_bridge.waits import ActiveWait, WaitSpec, begin_wait, check_wait, parse_wait_line
+from agent_bridge.waits import ActiveWait, WaitSpec, begin_wait, check_wait, parse_wait_line, proc_start
 
 NOW = datetime(2026, 10, 2, 22, 33, 0, tzinfo=IST)
 
@@ -96,3 +96,31 @@ def test_real_pid_start_time_for_this_process() -> None:
 
     assert pid_start_time(os.getpid())
     assert pid_start_time(2**22 + 12345) is None
+
+
+def test_proc_start_reads_field_22() -> None:
+    stat = "1234 (my (odd) proc) S 1 1234 1234 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 98765 1000 100\n"
+    assert proc_start(stat) == "boot+98765"
+    assert proc_start(stat.replace(") S ", ") Z ")) is None
+    assert proc_start("1234 (cut short) S 1 2") is None
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="Linux /proc")
+def test_pid_start_time_needs_no_ps_on_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    import os
+    import subprocess
+    import time
+
+    from agent_bridge.waits import pid_start_time
+
+    def no_ps(*args: object, **kw: object) -> None:
+        raise FileNotFoundError("ps")
+
+    monkeypatch.setattr(subprocess, "run", no_ps)
+    assert pid_start_time(os.getpid()) and pid_start_time(os.getpid()) == pid_start_time(os.getpid())
+    child = subprocess.Popen(["true"])
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not Path(f"/proc/{child.pid}/stat").read_text().split(") ")[1].startswith("Z"):
+        time.sleep(0.01)
+    assert pid_start_time(child.pid) is None
+    child.wait()
