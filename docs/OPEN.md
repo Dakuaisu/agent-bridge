@@ -78,3 +78,17 @@ Status: OPEN, OWNER-BLOCKED or RESOLVED.
   `tools/bridge.py` shares (`STOP`, `unsent_reply.md`) and the rollback steps in `docs/MIGRATION.md`
   section 5. Owner to decide.
 
+## OPEN-007 The sandbox's writable tool folders run code later
+- Status: OPEN
+- The Claude Code builder's sandbox (`sandbox.py`, `HOME_WRITABLE`) lets it write tool folders that hold
+  settings and programs run later outside the sandbox: `~/.claude` (settings hooks, and the `CLAUDE.md`
+  every Claude Code session loads, the read-only roles' included), `~/.claude.json` (MCP servers),
+  `~/.local/share/claude` (Claude Code's installs), `~/.cargo/bin`, Gradle init scripts, IPython and
+  Jupyter startup files, `~/.docker` (credential helpers).
+- That fits the sandbox's purpose, preventing accidents, but not a builder turned by hostile content.
+  `project.verify` also runs outside the sandbox and usually runs code the builder wrote.
+- Options, each needing a live builder turn to test: deny writes to `~/.claude/settings*.json`,
+  `~/.claude/CLAUDE.md` and `~/.claude/hooks`; start the read-only roles with `--strict-mcp-config`;
+  turn off Claude Code's auto-update for the builder, so its installs need not be writable; drop or
+  narrow `.cargo`, `.gradle`, `.ipython`, `.jupyter` and `.docker`. Owner to decide.
+
