@@ -391,7 +391,8 @@ def planner_replan(cfg: Config, writable: list[str]) -> str:
         "evidence and paths, MATERIAL yes or no, AFFECTS with the requirement ids and phases it touches, one "
         "or more EDIT blocks whose FIND text is copied exactly from the current files, LEDGER (context, "
         "options, decision, why) and TO SUPERVISOR. Otherwise return NO CHANGE with the reason and TO "
-        f"SUPERVISOR. You may edit only: {', '.join(writable)}. Never loosen an exit criterion or a threshold "
+        f"SUPERVISOR. You may edit only: {', '.join(writable)}; the ledger is append-only, so add entries after "
+        "its last one and never change an existing one. Never loosen an exit criterion or a threshold "
         "to make a phase pass; if a phase cannot meet its exit criteria, record that as an OWNER-BLOCKED item "
         "instead. Material changes wait for the owner unless the owner chose --auto-approve, and a change that "
         "weakens an exit criterion or a threshold always waits for the owner."
@@ -406,5 +407,6 @@ def planner_decide(cfg: Config, doc: str, writable: list[str]) -> str:
         "Co-Authored-By line), work through the D-items in order, report which are done with commit hashes and "
         "run ids, and finish when the \"Done when\" checklist holds. If a decision is ambiguous or conflicts "
         "with the PRD, return QUESTIONS first, numbered, each with a recommended answer. You may edit only: "
-        f"{', '.join(writable)}."
+        f"{', '.join(writable)}; the ledger is append-only, so add entries after its last one and never change an "
+        "existing one."
     )

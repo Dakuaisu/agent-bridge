@@ -688,7 +688,7 @@ class ContractEngine(Engine):
             if path == cfg.path.resolve():
                 errors += self._check_config_change(r.after)
             elif path == cfg.project.decisions.resolve():
-                errors += contract.protected_line_errors(self.rel(path), r.before, r.after, may_change_status=False)
+                errors += contract.protected_line_errors(self.rel(path), r.before, r.after, may_change_status=False, append_only=True)
             elif path == cfg.project.open_items.resolve():
                 errors += contract.protected_line_errors(self.rel(path), r.before, r.after, may_change_status=owner_source)
         return errors

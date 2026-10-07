@@ -262,21 +262,42 @@ _PROTECTED = re.compile(r"^\W*(?:Status|Decided by)\s*:", re.IGNORECASE)
 _OWNER_CLAIM = re.compile(r"OWNER DECISION|(?:approved|rejected|decided|accepted)\s+by\s+the\s+owner", re.IGNORECASE)
 
 
-def protected_line_errors(name: str, original: str, new: str, *, may_change_status: bool) -> list[str]:
+_ENTRY_HEADING = re.compile(r"^#{1,6}\s+(.*\S)\s*$")
+
+
+def _protected_by_entry(text: str) -> dict[str, list[str]]:
+    """Each entry's Status / Decided by lines, keyed by the heading above them ('' before the first heading)."""
+    out: dict[str, list[str]] = {}
+    entry = ""
+    for ln in text.splitlines():
+        if m := _ENTRY_HEADING.match(ln):
+            entry = m.group(1)
+        elif _PROTECTED.match(ln):
+            out.setdefault(entry, []).append(ln.strip())
+    return out
+
+
+def protected_line_errors(name: str, original: str, new: str, *, may_change_status: bool, append_only: bool = False) -> list[str]:
     """The planner may add to the ledger and the open items, but never rewrite who decided what (DESIGN 6.5).
 
-    Every Status / Decided by line that exists must survive unchanged (unless the owner's own decisions are being
-    applied to open items), and no new one may claim the owner's approval."""
+    The ledger is append-only: every existing entry must stay exactly as it is. In the open items every Status /
+    Decided by line must stay under its own entry (unless the owner's own decisions are being applied). No new
+    line may claim the owner's approval."""
     errors = []
     before = [ln.strip() for ln in original.splitlines() if _PROTECTED.match(ln)]
     after = [ln.strip() for ln in new.splitlines() if _PROTECTED.match(ln)]
-    if not may_change_status:
-        remaining = list(after)
-        for ln in before:
-            if ln in remaining:
-                remaining.remove(ln)
-            else:
-                errors.append(f"{name}: the planner may add entries, but not change or remove an existing line: {ln!r}")
+    if append_only:
+        if not new.startswith(original.rstrip()):
+            errors.append(f"{name}: the ledger is append-only; add entries after the last one and leave the existing ones exactly as they are")
+    elif not may_change_status:
+        now = _protected_by_entry(new)
+        for entry, lines in _protected_by_entry(original).items():
+            remaining = list(now.get(entry, []))
+            for ln in lines:
+                if ln in remaining:
+                    remaining.remove(ln)
+                else:
+                    errors.append(f"{name}: the planner may add entries, but not change, move or remove an existing line: {ln!r}")
     for ln in after:
         if ln not in before and _OWNER_CLAIM.search(ln):
             errors.append(f"{name}: the planner cannot claim the owner's decision: {ln!r}")

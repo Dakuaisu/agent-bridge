@@ -285,3 +285,20 @@ probes before it was fixed (DESIGN 8.4, `tests/test_audit.py`). The choices wort
 - **The cost figures** are each engine's API-price estimate. On a subscription they are a usage proxy,
   not a bill, and the cap is per `run`, like the other budget caps.
 - **Notifications** are on by default on macOS. Tests switch them off with `AGENT_BRIDGE_NO_NOTIFY=1`.
+
+## DEC-021 The ledger is append-only for the planner
+- Decided by: build agent (2026-10-07, at the owner's request)
+- Status: AUTONOMOUS DECISION - owner to review
+
+A second audit showed that the guard on the planner's ledger edits compared only the set of Status and
+Decided by lines in the whole file: swapping two entries' statuses, or rewriting the body of an
+owner-decided entry, passed and applied without the owner.
+- **The decisions ledger** is append-only for a plan change: the new text must begin with the old one.
+  The planner adds entries after the last and changes none, neither bookkeeping lines nor bodies. A later
+  decision supersedes an earlier one with a new entry.
+- **The open items** stay editable, because they are a working list, but each entry's Status and
+  Decided by lines must stay under that entry's heading. Only the owner's own decisions (`decide`) may
+  change them.
+- **A prefix check** rather than a per-entry comparison for the ledger: FilingQA's `TRADEOFFS.md` has
+  entries in more than one heading style, and a prefix check does not depend on any of them.
+

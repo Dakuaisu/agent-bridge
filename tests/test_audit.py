@@ -190,7 +190,7 @@ def test_a_replan_cannot_rewrite_who_decided_what(repo: Path, clock: FakeClock) 
     eng.run()
     ledger = (repo / "docs/DECISIONS.md").read_text()
     assert "REJECTED by the owner: superseded" not in ledger and "- Status: OWNER DECISION (agent-bridge approve)" in ledger
-    assert "may add entries, but not change or remove" in review_log(repo)
+    assert "the ledger is append-only" in review_log(repo)
 
 
 def test_protected_ledger_lines() -> None:
@@ -200,6 +200,39 @@ def test_protected_ledger_lines() -> None:
     assert contract.protected_line_errors("L", "- Status: OWNER-BLOCKED\n", "- Status: RESOLVED (D1)\n", may_change_status=True) == []
     claim = contract.protected_line_errors("L", "", "- Status: APPROVED by the owner\n", may_change_status=True)
     assert claim and "cannot claim the owner's decision" in claim[0]
+
+
+LEDGER = (
+    "## DEC-001 A\n- Decided by: planner\n- Status: AUTONOMOUS DECISION - owner to review\n\nUse Postgres.\n\n"
+    "## DEC-002 B\n- Decided by: owner\n- Status: OWNER DECISION (agent-bridge approve)\n\nKeep the CLI flags.\n"
+)
+
+
+@pytest.mark.parametrize(
+    "after",
+    [
+        LEDGER.replace("AUTONOMOUS DECISION - owner to review", "@").replace("OWNER DECISION (agent-bridge approve)", "AUTONOMOUS DECISION - owner to review").replace("@", "OWNER DECISION (agent-bridge approve)"),
+        LEDGER.replace("Keep the CLI flags.", "The owner approved dropping the CLI flags."),
+        LEDGER.replace("## DEC-001 A\n", "## DEC-001 A (superseded)\n"),
+    ],
+    ids=["swap two entries' Status lines", "rewrite an owner-decided entry's body", "rename an entry"],
+)
+def test_the_ledger_is_append_only_for_the_planner(after: str) -> None:
+    assert contract.protected_line_errors("docs/DECISIONS.md", LEDGER, after, may_change_status=False, append_only=True)
+
+
+def test_appending_to_the_ledger_is_allowed() -> None:
+    added = LEDGER + "\n## DEC-003 C\n- Decided by: planner\n- Status: PROPOSED\n\nAdd a cache.\n"
+    assert contract.protected_line_errors("docs/DECISIONS.md", LEDGER, added, may_change_status=False, append_only=True) == []
+
+
+def test_open_item_statuses_stay_with_their_entry() -> None:
+    items = "## OPEN-001 X\n- Status: OWNER-BLOCKED\n\n## OPEN-002 Y\n- Status: RESOLVED\n"
+    swapped = "## OPEN-001 X\n- Status: RESOLVED\n\n## OPEN-002 Y\n- Status: OWNER-BLOCKED\n"
+    assert contract.protected_line_errors("docs/OPEN.md", items, swapped, may_change_status=False)
+    assert contract.protected_line_errors("docs/OPEN.md", items, swapped, may_change_status=True) == []
+    reworded = items.replace("## OPEN-002 Y\n", "## OPEN-002 Y\nThe parser drops empty rows.\n")
+    assert contract.protected_line_errors("docs/OPEN.md", items, reworded, may_change_status=False) == []
 
 
 # ----------------------------------------------------------------- 4. one bad input stops everything

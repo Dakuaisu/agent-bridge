@@ -570,6 +570,9 @@ Context, options, decision and reasons, written by the decider.
 - For every entry it records, the bridge assigns the DEC- and PC- numbers and writes the
   heading and the "Decided by", "Status" and "Change" lines. The planner writes only the
   body, so it cannot claim the owner's approval.
+- A plan change may only append to the ledger: every existing entry, bookkeeping lines and
+  body, stays exactly as it is (DEC-021). In the open items, each entry's "Status" and
+  "Decided by" lines stay under that entry; only the owner's own decisions may change them.
 - Status values:
   - `PROPOSED`
   - `APPROVED by the owner <date>`
