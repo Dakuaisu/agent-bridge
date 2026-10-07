@@ -66,9 +66,15 @@ PUSH = re.compile(r"\bgit\s+push\b")
 SHELL_TOOLS = {"bash", "shell"}
 FILE_WRITE_TOOLS = {"write", "edit", "multiedit", "patch", "apply_patch", "notebookedit"}
 OUTSIDE_PATH = re.compile(r"(?<![\w.~-])(/[^\s'\";|&()<>`]+)")
+GIT_WRITES = {"commit", "add", "reset", "checkout", "switch", "push", "rm", "mv", "merge", "rebase", "stash", "clean", "restore", "tag", "cherry-pick", "revert", "am", "apply"}
+WRITES_EVERY_ARG = {"rm", "rmdir", "touch", "mkdir", "truncate", "tee"}
+WRITES_LAST_ARG = {"cp", "mv", "ln", "install"}
+COMMAND_PREFIXES = {"sudo", "nohup", "time", "command", "exec", "env"}
+SHELL_PUNCTUATION = "();<>|&\n"
+# Only for a command shlex cannot parse.
 SHELL_WRITE = re.compile(
-    r"\bgit\s+(?:-C\s+\S+\s+)?(?:commit|add|reset|checkout|switch|push|rm|mv|merge|rebase|stash|clean|restore|tag|cherry-pick|revert|am|apply)\b"
-    r"|\b(?:rm|mv|cp|touch|mkdir|tee|truncate|ln)\s|\bsed\s+-i|>{1,2}\s*/"
+    r"\bgit\s+(?:-C\s+\S+\s+)?(?:" + "|".join(sorted(GIT_WRITES)) + r")\b"
+    r"|\b(?:rm|mv|cp|touch|mkdir|tee|truncate|ln)\s|\bsed\s+-i|>{1,2}\s*/(?!dev/)"
 )
 
 
@@ -85,6 +91,95 @@ def _mask_repo(text: str, variants: list[str]) -> str:
     for v in sorted({v for v in variants if v}, key=len, reverse=True):
         text = re.sub(re.escape(v) + r"(?=/|$|[\s'\";|&)])", "AGENTBRIDGEREPO", text)
     return text
+
+
+def _shell_write_targets(command: str, repo: str, home: str) -> list[str] | None:
+    """Where a shell command writes, resolved from the folder each part runs in (after cd and git -C).
+
+    Redirect targets other than /dev/*, the files of rm, touch, mkdir, tee, truncate and sed -i, the destination of
+    cp, mv and ln, dd's of=, and the folder a writing git subcommand works in. None if the command cannot be parsed."""
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=SHELL_PUNCTUATION)
+        lexer.whitespace = " \t\r"
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return None
+    cwd: str | None = repo
+    targets: list[str] = []
+
+    def resolve(path: str, base: str | None) -> str | None:
+        path = home + path[1:] if path == "~" or path.startswith("~/") else path
+        path = re.sub(r"\$\{HOME\}|\$HOME\b", lambda m: home, path)
+        if "$" in path or "`" in path:
+            return None
+        if os.path.isabs(path):
+            return os.path.normpath(path)
+        return os.path.normpath(os.path.join(base, path)) if base else None
+
+    def add(path: str, base: str | None) -> None:
+        if (resolved := resolve(path, base)) is not None:
+            targets.append(resolved)
+
+    def run(words: list[str]) -> None:
+        nonlocal cwd
+        while words and (re.match(r"^\w+=", words[0]) or words[0] in COMMAND_PREFIXES):
+            words = words[1:]
+        if not words:
+            return
+        cmd, args = os.path.basename(words[0]), words[1:]
+        paths = [a for a in args if a and not a.startswith("-")]
+        if cmd in ("cd", "pushd"):
+            cwd = resolve(paths[0], cwd) if paths else home
+        elif cmd == "git":
+            where, i = cwd, 0
+            while i < len(args) and args[i].startswith("-"):
+                if args[i] == "-C" and i + 1 < len(args):
+                    where = resolve(args[i + 1], where)
+                i += 2 if args[i] in ("-C", "-c") else 1
+            if i < len(args) and args[i] in GIT_WRITES and where is not None:
+                targets.append(where)
+        elif cmd in WRITES_EVERY_ARG:
+            for path in paths:
+                add(path, cwd)
+        elif cmd in WRITES_LAST_ARG and len(paths) >= 2:
+            add(paths[-1], cwd)
+        elif cmd == "sed" and any(a.startswith(("-i", "--in-place")) for a in args):
+            files, skip, script_given = [], False, False
+            for a in args:
+                if skip:
+                    skip = False
+                elif a in ("-e", "-f", "--expression", "--file"):
+                    skip = script_given = True
+                elif a and not a.startswith("-"):
+                    files.append(a)
+            for path in files if script_given else files[1:]:
+                add(path, cwd)
+        elif cmd == "dd":
+            for a in args:
+                if a.startswith("of="):
+                    add(a[3:], cwd)
+
+    words: list[str] = []
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if not tok or set(tok) - set(SHELL_PUNCTUATION):
+            words.append(tok)
+        elif ">" in tok:
+            target = tokens[i + 1] if i + 1 < len(tokens) else ""
+            fd_copy = tok.endswith("&") and (target.isdigit() or target == "-")
+            if target and not fd_copy and not target.startswith("/dev/"):
+                add(target, cwd)
+            i += 1
+        elif "<" in tok:
+            i += 1
+        else:
+            run(words)
+            words = []
+        i += 1
+    run(words)
+    return targets
 
 
 def _shell_dirs(command: str, repo: str, home: str) -> list[str]:
@@ -691,7 +786,8 @@ class Engine:
         """Writes under the owner's home outside the repo: reported, and they pause the run. Reads are only reported.
 
         Paths are read from the tool calls: absolute paths, ~ and $HOME, and the folders a shell command moves to with
-        cd or git -C. A relative path that the tool resolved somewhere else is invisible here (see _wrote_elsewhere)."""
+        cd or git -C. A shell command counts as a write only where its write targets are outside (/dev/* never is).
+        A relative path that the tool resolved somewhere else is invisible here (see _wrote_elsewhere)."""
         repo = os.path.realpath(self.cfg.project.repo)
         home = os.path.realpath(Path.home())
         roots = tuple({"/Users/", home + os.sep})
@@ -710,9 +806,15 @@ class Engine:
             found = [p for p in OUTSIDE_PATH.findall(text) if outside(p)]
             if name in SHELL_TOOLS:
                 found += [d for d in _shell_dirs(call.summary, repo, home) if outside(d)]
-            if not found:
+                targets = _shell_write_targets(call.summary, repo, home)
+                if targets is None:
+                    mutating = bool(found) and bool(SHELL_WRITE.search(call.summary))
+                else:
+                    mutating = any(outside(t) for t in targets)
+            else:
+                mutating = bool(found) and name in FILE_WRITE_TOOLS
+            if not (found or mutating):
                 continue
-            mutating = name in FILE_WRITE_TOOLS or (name in SHELL_TOOLS and SHELL_WRITE.search(call.summary))
             (writes if mutating else reads).append(f"{call.name}: {call.summary[:200]}")
         if reads:
             self.j.review(f"BUILDER READ OUTSIDE THE REPO at exchange {self.st.exchange}", "\n".join(reads))

@@ -286,6 +286,17 @@ def outside(repo: str, calls: list[tuple[str, str]]) -> tuple[list[str], list[st
         ([("bash", "git -C ../other-repo commit -am wip")], True),
         ([("Write", "{home}/src/other-repo/x.py")], True),
         ([("write", "docs/PRD.md")], False),
+        ([("bash", "ls ~/.cache/pip 2>/dev/null")], False),
+        ([("bash", "cd ~/src/other-repo && git status 2>/dev/null")], False),
+        ([("bash", "cat ~/.gitconfig > /dev/null")], False),
+        ([("bash", "cp ~/.gitconfig ./gitconfig.copy && git add gitconfig.copy")], False),
+        ([("bash", "pytest -q 2>&1 | tee build.log")], False),
+        ([("bash", "echo done >> ~/notes.txt")], True),
+        ([("bash", "rm -rf ~/src/other-repo/build 2>/dev/null")], True),
+        ([("bash", "cd ~/src/other-repo\ngit commit -am wip")], True),
+        ([("bash", "sed -i '' 's/a/b/' ~/src/other-repo/x.py")], True),
+        ([("bash", "cp notes.md ~/src/other-repo/")], True),
+        ([("bash", "echo $(touch ~/src/other-repo/flag)")], True),
     ],
 )
 def test_outside_repo_detection(calls: list[tuple[str, str]], flagged: bool) -> None:
@@ -293,6 +304,12 @@ def test_outside_repo_detection(calls: list[tuple[str, str]], flagged: bool) -> 
     repo = f"{home}/src/my project"
     writes, _ = outside(repo, [(n, s.format(repo=repo, home=home)) for n, s in calls])
     assert bool(writes) is flagged
+
+
+def test_a_read_outside_the_repo_is_reported_not_paused() -> None:
+    home = os.path.realpath(Path.home())
+    writes, logged = outside(f"{home}/src/proj", [("bash", "ls ~/.cache/pip 2>/dev/null")])
+    assert writes == [] and logged == ["BUILDER READ OUTSIDE THE REPO at exchange 1"]
 
 
 def test_reads_outside_are_reported_not_paused() -> None:
