@@ -358,6 +358,15 @@ def test_no_arguments_without_a_terminal_prints_help(capsys: pytest.CaptureFixtu
     assert cli.main(["ui"]) == 2
 
 
+@pytest.mark.parametrize("content", [b'{"projects": 5}', b'["x"]', b'{"projects": [5, {"repo": 3}]}', b"\xff\xfe{", b""])
+def test_registry_survives_a_malformed_file(tmp_path: Path, content: bytes) -> None:
+    registry.registry_path().parent.mkdir(parents=True, exist_ok=True)
+    registry.registry_path().write_bytes(content)
+    assert registry.projects() == []
+    registry.remember(tmp_path, "x")
+    assert [p["name"] for p in registry.projects()] == ["x"]
+
+
 def test_registry_keeps_one_entry_per_resolved_repo(tmp_path: Path) -> None:
     a = tmp_path / "a"
     a.mkdir()

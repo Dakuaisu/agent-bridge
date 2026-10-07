@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +18,10 @@ def registry_path() -> Path:
 def projects() -> list[dict[str, Any]]:
     try:
         data = read_json(registry_path(), default=None)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return []
     items = data.get("projects") if isinstance(data, dict) else None
-    return [p for p in items or [] if isinstance(p, dict) and isinstance(p.get("repo"), str)]
+    return [p for p in items if isinstance(p, dict) and isinstance(p.get("repo"), str)] if isinstance(items, list) else []
 
 
 def remember(repo: Path, name: str) -> None:
