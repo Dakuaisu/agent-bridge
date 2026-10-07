@@ -485,6 +485,10 @@ def test_parser_near_misses() -> None:
     assert parse_builder("DECISIONS NEEDED:\n- one?\n\n## Changes\n- a\n", now=now, phase_pattern=pattern).decisions_needed == ["one?"]
     assert parse_wait_line("WAIT FOR FILE out/done.flag (written when training ends)", now=now).target == "out/done.flag"
     assert classify("Error: request failed at line 401 of handler.py") == "other"
+    for text in ("error at line 401", "Error code 7 at line 401 of parser.py", "status of row 401: ok"):
+        assert classify(text) == "other", text
+    for text in ("HTTP 401", "status: 401", "Error 401", "API Error: 401", "error code=401", "HTTP/1.1 401 Unauthorized"):
+        assert classify(text) == "auth", text
     assert classify("API Error: 401 authentication_error") == "auth"
     assert classify("Credit balance is too low") == "billing"
 

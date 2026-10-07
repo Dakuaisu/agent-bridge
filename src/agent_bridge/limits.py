@@ -91,8 +91,8 @@ AUTH_PATTERNS = [
     r"invalid x-api-key",
     r"authentication_error",
     r"\bnot logged in\b",
-    # A bare "401" is too common ("line 401"): only an HTTP status, or 401 next to an auth word, counts.
-    r"(?:http|status|error|code)\D{0,12}\b401\b",
+    # A bare "401" is too common ("line 401"): only 401 right after http/status/error/code, or near an auth word.
+    r"(?:http|status|error|code)[^\w\n]{0,4}401\b",
     r"\b401\b(?=[^\n]{0,40}(?:unauthori[sz]ed|authenticat|invalid|token|credential|log ?in))",
     r"\binvalid_grant\b",
 ]
