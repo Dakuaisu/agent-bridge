@@ -197,9 +197,11 @@ when it starts, so after changing it start a fresh one: `agent-bridge pin
    `session`, `supervisor_session` or the kickoff files; it appends to the logs, and
    writes `builder_last.md` with the same meaning the old bridge expects.
 3. To remove agent-bridge's own files, delete `bridge.toml` and, in `.bridge/`:
-   `state.json`, `events.jsonl`, `sessions.json`, `lock`, `plan/`, `turns/`, `inbox/`,
-   `reports/`, and any `report.md`, `owner_todo.md` or `PAUSED.md`. The ledger entries
-   agent-bridge appended to `docs/TRADEOFFS.md` stay; revert them with git if you want.
+   `state.json`, `events.jsonl`, `sessions.json`, `lock`, `plan/`, `turns/`, `reports/`,
+   and any `report.md`, `owner_todo.md` or `PAUSED.md`. Also delete the repo's owner-only
+   folder under `~/.local/state/agent-bridge/repos/` (the repo's name and a hash), which
+   holds the inbox and the waiting plan changes. The ledger entries agent-bridge appended to
+   `docs/TRADEOFFS.md` stay; revert them with git if you want.
 4. Revert `CLAUDE.md` with git if you applied `--write-rules`.
 
 ## 6. What happened on the FilingQA move (2026-10-06)

@@ -13,6 +13,7 @@ from agent_bridge import cli, runtime
 from agent_bridge.backends.base import READ_ONLY_BY_INSTRUCTION
 from agent_bridge.backends.fake import FakeBackend, FakeScriptExhausted
 from agent_bridge.clock import FakeClock
+from agent_bridge.statedir import StateDir
 from agent_bridge.config import ROLES, load_config
 from agent_bridge.engine import State
 
@@ -166,7 +167,7 @@ def test_status_text_and_json(repo: Path, fakes: Fakes, capsys: pytest.CaptureFi
 def test_say_and_stop_without_a_running_bridge(repo: Path, fakes: Fakes, capsys: pytest.CaptureFixture[str]) -> None:
     (repo / "bridge.toml").write_text("version = 1\n")
     assert run("say", "Prefer SQLite.", "--repo", str(repo), "--to", "supervisor") == 0
-    items = list((repo / ".bridge/inbox").glob("*.json"))
+    items = list(StateDir(repo).inbox.glob("*.json"))
     assert len(items) == 1 and json.loads(items[0].read_text())["to"] == "supervisor"
     assert run("stop", "--repo", str(repo)) == 0
     assert "no bridge is running" in capsys.readouterr().out

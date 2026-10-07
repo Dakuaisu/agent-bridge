@@ -302,3 +302,22 @@ owner-decided entry, passed and applied without the owner.
 - **A prefix check** rather than a per-entry comparison for the ledger: FilingQA's `TRADEOFFS.md` has
   entries in more than one heading style, and a prefix check does not depend on any of them.
 
+## DEC-022 The owner's inbox and waiting plan changes live outside the repo
+- Decided by: build agent (2026-10-07, at the owner's request)
+- Status: AUTONOMOUS DECISION - owner to review
+
+The second audit showed that a builder could write `.bridge/inbox/`, which is inside the repo and so
+writable in the sandbox, and reach both agents as `[owner]`, or approve its own plan changes. Checking it
+showed the same for `.bridge/plan/changes/`: approval applied whatever edits that file held.
+- **The inbox** moved to a per-repo folder under `~/.local/state/agent-bridge/repos/`
+  (`$XDG_STATE_HOME` if set). The sandbox does not let the builder write there; a live `sandbox-exec`
+  check got "Operation not permitted". The old `.bridge/inbox/` is no longer read, and nothing in it is
+  carried over, because anything there may have come from the builder.
+- **Waiting plan changes** keep a copy of what the planner proposed in the same folder. Approval refuses a
+  change whose `.bridge/plan/changes/` files differ from that copy, because the owner may have read the
+  altered version. Rejection still works, and uses the copy.
+- **A builder running an owner command** (`agent-bridge say`, `approve`, `decide`, `engines`, `init`,
+  `new`, `pin`, `stop`) is logged as `DANGER COMMAND`. An unsandboxed builder can still do anything the
+  owner can; the log only makes it visible.
+- **The rest of `.bridge/`** stays in the repo for now (OPEN-006).
+

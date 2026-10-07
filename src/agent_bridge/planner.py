@@ -471,6 +471,10 @@ class ContractEngine(Engine):
         self.j.review("CONTRACT RE-APPROVED (owner)", listing)
         return [f"re-approved {', '.join(changed) or 'the unchanged contract'}; recorded {dec}"]
 
+    def _change_copy(self, record: dict[str, Any]) -> dict[str, Any]:
+        fixed = {k: record.get(k) for k in ("id", "title", "reason", "edits", "dec", "diff", "affects", "weakens", "open_item")}
+        return {"record": fixed, "diff": _read(self.cfg.project.repo / record["diff"]) if record.get("diff") else ""}
+
     def waiting_changes(self) -> list[dict[str, Any]]:
         return [c for c in self.changes() if c.get("status") == "awaiting"]
 
@@ -483,6 +487,18 @@ class ContractEngine(Engine):
             if record is None:
                 messages.append(f"{pc}: not a plan change waiting for the owner")
                 continue
+            trusted_path = self.sd.trusted_changes / f"{pc}.json"
+            trusted = read_json(trusted_path, default=None)
+            if isinstance(trusted, dict) and trusted != self._change_copy(record):
+                self.j.review(
+                    f"PLAN CHANGE {pc} ALTERED ON DISK",
+                    f".bridge/plan/changes/{pc}.json or its diff no longer match what the planner proposed; "
+                    + ("it was rejected as the planner proposed it" if reject else "nothing was applied"),
+                )
+                record.update(trusted["record"])
+                if not reject:
+                    messages.append(f"{pc}: its files in .bridge/plan/changes changed after the planner proposed it; not applied. Reject it, or ask for a new re-plan")
+                    continue
             when = iso(self.now())
             if reject:
                 record.update(status="rejected", settled=when, reason_rejected=reason)
@@ -508,6 +524,7 @@ class ContractEngine(Engine):
                 contract.set_open_status(self.cfg.project.open_items, record["open_item"], f"RESOLVED ({record['status']} by the owner {when[:10]})")
             self.st.blocked.get("changes", {}).pop(pc, None)
             self._save_change(record)
+            trusted_path.unlink(missing_ok=True)
             self.j.review(f"PLAN CHANGE {pc} {record['status'].upper()} by the owner", reason)
         self.save()
         return messages
@@ -808,6 +825,8 @@ class ContractEngine(Engine):
             if source != "owner":
                 st.planner_queue.append(f"The plan changed: {pc} {out.title} ({dec}; diff {diff_rel}). Re-read the changed parts: {shown}.")
         self._save_change(record)
+        if outcome == "awaiting":
+            atomic_write_json(self.sd.trusted_changes / f"{pc}.json", self._change_copy(record))
         self.j.review(f"PLAN CHANGE {pc} ({outcome}): {out.title}", f"{status}; affects {shown}; {dec}; diff {diff_rel}")
         if outcome == "awaiting":
             self.notify("needs_you", f"{pc} waits for your approval", out.title)

@@ -65,3 +65,16 @@ Status: OPEN, OWNER-BLOCKED or RESOLVED.
   SDK; no live run with a Task subagent has confirmed it yet.
 - The `git push` deny (`permissions.deny: Bash(git push:*)`) under `bypassPermissions` is configured but
   untested live. Remote refs are compared after every builder turn either way.
+
+## OPEN-006 Control state the builder can still write
+- Status: OPEN
+- `.bridge/state.json`, `agent.pid`, `unsent_reply.md` and `STOP` are inside the repo, so a sandboxed
+  builder can write them (DEC-022 moved only the inbox and the waiting plan changes).
+- A running bridge loads `state.json` once and then only writes it, so a builder's edit during a run is
+  overwritten. An edit made while no bridge runs, for example by a background job the builder left, is
+  read at the next start. A forged `agent.pid` with another process's pid and start time would make the
+  leftover check end that process group.
+- Moving all control state out of the repo closes this. It changes the file layout the old
+  `tools/bridge.py` shares (`STOP`, `unsent_reply.md`) and the rollback steps in `docs/MIGRATION.md`
+  section 5. Owner to decide.
+

@@ -3,18 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from agent_bridge.clock import RealClock, iso
-from agent_bridge.statedir import atomic_write_json, read_json
+from agent_bridge.statedir import atomic_write_json, read_json, state_home
 
 LIMIT = 200
-
-
-def state_home() -> Path:
-    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "agent-bridge"
 
 
 def registry_path() -> Path:

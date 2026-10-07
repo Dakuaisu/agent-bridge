@@ -61,6 +61,7 @@ DEFAULT_DANGER = [
     (re.compile(r"\brm\s+-(?:[a-zA-Z]*r[a-zA-Z]*f|[a-zA-Z]*f[a-zA-Z]*r)[a-zA-Z]*\s+(?:/|~|\$HOME)"), "rm -rf on an absolute or home path"),
     (re.compile(r"(?i)\bdrop\s+(?:table|database|schema)\b"), "DROP TABLE / DATABASE"),
     (re.compile(r"(?i)co-authored-by"), "Co-Authored-By in a command"),
+    (re.compile(r"\bagent-bridge\s+(?:approve|decide|engines|init|new|pin|say|stop)\b"), "an owner command"),
 ]
 PUSH = re.compile(r"\bgit\s+push\b")
 SHELL_TOOLS = {"bash", "shell"}

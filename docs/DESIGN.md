@@ -66,7 +66,7 @@ deleting sessions (the tool records the sessions it creates and never deletes on
 agent_bridge/
   cli.py          one function per command
   config.py       bridge.toml via tomllib, validated into frozen dataclasses
-  statedir.py     .bridge/ layout, atomic JSON writes, lock, inbox, STOP
+  statedir.py     .bridge/ layout, atomic JSON writes, lock, STOP; the owner-only folder
   journal.py      events.jsonl (structured), loop.log, review.log, console.log
   engine.py       the loop: a persisted state machine (section 7)
   planner.py      interview, drafting, re-planning, owner decisions, plan changes
@@ -946,7 +946,8 @@ An outside audit reproduced each finding below with a script; each fix has a tes
     Open items are the exception during the owner's own `decide`.
   - No new line may claim the owner's decision.
 - **One bad input never stops everything.**
-  - A queued owner item that fails is moved to `.bridge/inbox/failed/` with its error.
+  - A queued owner item that fails is moved to `inbox/failed/` in the owner-only folder (section 10)
+    with its error.
   - Owner text is never used as a regex template.
   - Display and contract reads tolerate bad UTF-8.
   - The UI catches refresh errors, a malformed `$EDITOR` and an unknown locale.
@@ -1096,7 +1097,6 @@ Compatible with the old layout, so migration keeps the logs.
 | `plan/` | interview questions and answers, the drafts as returned, `changes/PC-NNN.json` and `.diff` |
 | `turns/NNNN-<role>.jsonl` | raw event streams; the 200 most recent kept |
 | `builder_last.md` | the last builder report (kept for compatibility) |
-| `inbox/` | owner messages, approvals and decisions docs not yet delivered |
 | `STOP`, `STOP_NOW` | stop requests |
 | `unsent_reply.md` | the pending message saved on stop |
 | `PAUSED.md` | the pause summary |
@@ -1105,6 +1105,15 @@ Compatible with the old layout, so migration keeps the logs.
 
 `init` and `new` add `.bridge/` to `.gitignore`, and `.omo/` when a role uses opencode. Both
 are excluded from the repo snapshots behind the tripwire and the change counter (DEC-014).
+
+What only the owner may write lives outside the repo, in
+`~/.local/state/agent-bridge/repos/<repo name>-<hash>/` (`$XDG_STATE_HOME` if set), where a
+sandboxed builder cannot write (DEC-022):
+
+| File | Content |
+|---|---|
+| `inbox/` | owner messages, approvals and decisions docs not yet delivered; `failed/` keeps the ones that failed |
+| `plan-changes/PC-NNN.json` | what the planner proposed for each change waiting for the owner. Approval refuses a change whose `.bridge/plan/changes/` files differ from it; rejection uses this copy |
 
 ## 11. CLI
 

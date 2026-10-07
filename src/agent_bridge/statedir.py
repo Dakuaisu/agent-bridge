@@ -1,11 +1,14 @@
-"""The .bridge/ folder: layout, atomic writes, the single-instance lock, the owner inbox, STOP."""
+"""The .bridge/ folder: layout, atomic writes, the single-instance lock, STOP; and, outside the repo, the owner
+inbox and the trusted copies of waiting plan changes."""
 
 from __future__ import annotations
 
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
+import re
 import socket
 import tempfile
 from dataclasses import dataclass
@@ -52,6 +55,17 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 def atomic_write_json(path: Path, data: Any) -> None:
     atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n")
+
+
+def state_home() -> Path:
+    return Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state") / "agent-bridge"
+
+
+def control_dir(repo: Path) -> Path:
+    """The repo's owner-only state, outside the repo: a sandboxed builder can write the repo, never this."""
+    real = os.path.realpath(repo)
+    slug = re.sub(r"[^a-z0-9]+", "-", os.path.basename(real).lower()).strip("-") or "repo"
+    return state_home() / "repos" / f"{slug}-{hashlib.sha1(real.encode()).hexdigest()[:12]}"
 
 
 def read_json(path: Path, default: Any = None) -> Any:
@@ -145,6 +159,7 @@ class StateDir:
     def __init__(self, repo: Path) -> None:
         self.repo = Path(repo)
         self.root = self.repo / ".bridge"
+        self.control = control_dir(self.repo)
 
     def ensure(self) -> None:
         for d in (self.root, self.plan, self.plan / "changes", self.turns, self.inbox, self.reports):
@@ -196,7 +211,12 @@ class StateDir:
 
     @property
     def inbox(self) -> Path:
-        return self.root / "inbox"
+        return self.control / "inbox"
+
+    @property
+    def trusted_changes(self) -> Path:
+        """What the planner proposed for each plan change waiting for the owner; .bridge/plan/changes is the display copy."""
+        return self.control / "plan-changes"
 
     @property
     def stop_file(self) -> Path:

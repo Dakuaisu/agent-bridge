@@ -109,6 +109,7 @@ acting (Claude Code runs it with `bypassPermissions`, opencode with `--auto`). W
 | `git push` | Claude Code: denied by a permission rule while `git.push = "never"`, the default (not yet seen live) | "Never push, and never add a remote." | logged as `DANGER COMMAND` |
 | Force push, `git reset --hard`, `rm -rf` on absolute or home paths, `DROP TABLE`, your `safety.danger_commands` | | "Never rewrite history or force-push." | logged as `DANGER COMMAND`; the run continues |
 | `Co-Authored-By` or AI attribution in commits | | "No `Co-Authored-By` or AI-attribution lines." | logged as `COMMIT ATTRIBUTION`; nothing rewrites history |
+| The builder poses as the owner | Claude Code on macOS: your inbox is outside the repo, where the sandbox does not let the builder write. Every engine: a waiting plan change whose files were altered cannot be approved | | a builder running `agent-bridge say`, `approve`, `decide` or another owner command is logged as `DANGER COMMAND` |
 | The contract changes | a plan change may not touch the owner-only settings: `git.push`, `billing.mode`, `project.verify`, the sandbox, `notify.command` | never edit the PRD, `CLAUDE.md` or `bridge.toml`; propose changes instead | the builder's edits to them are logged, and the supervisor is told to have them restored; changes between runs are logged when a run starts |
 
 The sandbox covers writes only: reads, the network and running programs are untouched. **For
